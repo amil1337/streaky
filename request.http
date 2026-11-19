@@ -1,0 +1,58 @@
+### Session + CSRF (HTTP client keeps cookies)
+GET http://localhost:8080/api/auth/csrf
+
+> {% client.global.set("csrf", response.body.token); %}
+
+### Register (change username before repeating)
+POST http://localhost:8080/api/auth/register
+Content-Type: application/json
+X-CSRF-TOKEN: {{csrf}}
+
+{"username":"portfolio_demo","password":"portfolio123","timezone":"Europe/Istanbul"}
+
+### Login
+POST http://localhost:8080/api/auth/login
+Content-Type: application/json
+X-CSRF-TOKEN: {{csrf}}
+
+{"username":"portfolio_demo","password":"portfolio123"}
+
+### Profile
+GET http://localhost:8080/api/auth/me
+
+### Create a counter
+POST http://localhost:8080/api/habits
+Content-Type: application/json
+X-CSRF-TOKEN: {{csrf}}
+
+{"name":"Drink water","description":"","kind":"counter","target":5,"unit":"glasses"}
+
+> {% client.global.set("habitId", response.body.id); %}
+
+### Increment (can exceed target)
+POST http://localhost:8080/api/habits/{{habitId}}/increment
+X-CSRF-TOKEN: {{csrf}}
+
+### Decrement
+POST http://localhost:8080/api/habits/{{habitId}}/decrement
+X-CSRF-TOKEN: {{csrf}}
+
+### Last 26 weeks
+GET http://localhost:8080/api/habits/{{habitId}}/heatmap?days=182
+
+### Same range statistics
+GET http://localhost:8080/api/habits/{{habitId}}/statistics?days=182
+
+### Activity newest first
+GET http://localhost:8080/api/activity?page=0&size=30
+
+### Edit profile
+PATCH http://localhost:8080/api/users/me
+Content-Type: application/json
+X-CSRF-TOKEN: {{csrf}}
+
+{"name":"Amil","bio":"Portfolio","timezone":"Europe/Istanbul"}
+
+### Logout (get a fresh CSRF token before next login)
+POST http://localhost:8080/api/auth/logout
+X-CSRF-TOKEN: {{csrf}}

@@ -1,0 +1,10 @@
+.git
+.idea
+.data
+target
+*.iml
+*.log
+.env
+.env.*
+work
+outputs

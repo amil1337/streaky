@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: streaky
+    runtime: docker
+    plan: free
+    autoDeployTrigger: commit
+    healthCheckPath: /api/health
+    envVars:
+      - key: DB_URL
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: COOKIE_SECURE
+        value: 'true'

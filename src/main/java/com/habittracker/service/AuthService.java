@@ -1,0 +1,73 @@
+package com.habittracker.service;
+
+import static org.springframework.http.HttpStatus.*;
+
+import com.habittracker.dto.ProfileRequest;
+import com.habittracker.model.User;
+import com.habittracker.repository.UserRepository;
+import java.nio.charset.StandardCharsets;
+import java.time.ZoneId;
+import java.util.*;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
+
+@Service
+@Transactional
+public class AuthService {
+  private final UserRepository users;
+  private final BCryptPasswordEncoder passwords;
+
+  public AuthService(UserRepository users, BCryptPasswordEncoder passwords) {
+    this.users = users;
+    this.passwords = passwords;
+  }
+
+  public User register(String username, String password, String timezone) {
+    String clean = username.trim().toLowerCase(Locale.ROOT);
+    checkPassword(password);
+    if (users.existsByUsername(clean))
+      throw new ResponseStatusException(CONFLICT, "Username already exists");
+    return users.saveAndFlush(new User(clean, passwords.encode(password), zone(timezone, "UTC")));
+  }
+
+  public User login(String username, String password) {
+    checkPassword(password);
+    User user =
+        users
+            .findByUsername(username.trim().toLowerCase(Locale.ROOT))
+            .orElseThrow(
+                () -> new ResponseStatusException(UNAUTHORIZED, "Invalid username or password"));
+    if (!passwords.matches(password, user.getPasswordHash()))
+      throw new ResponseStatusException(UNAUTHORIZED, "Invalid username or password");
+    return user;
+  }
+
+  @Transactional(readOnly = true)
+  public User getUser(UUID id) {
+    return users
+        .findById(id)
+        .orElseThrow(() -> new ResponseStatusException(UNAUTHORIZED, "Login required"));
+  }
+
+  public User updateProfile(UUID id, ProfileRequest request) {
+    User user = getUser(id);
+    user.update(request.name(), request.bio(), zone(request.timezone(), user.getTimezone()));
+    return user;
+  }
+
+  private String zone(String value, String fallback) {
+    if (value == null || value.isBlank()) return fallback;
+    try {
+      return ZoneId.of(value).getId();
+    } catch (java.time.DateTimeException e) {
+      throw new ResponseStatusException(BAD_REQUEST, "Invalid timezone");
+    }
+  }
+
+  private void checkPassword(String value) {
+    if (value.getBytes(StandardCharsets.UTF_8).length > 72)
+      throw new ResponseStatusException(BAD_REQUEST, "Password must not exceed 72 UTF-8 bytes");
+  }
+}
