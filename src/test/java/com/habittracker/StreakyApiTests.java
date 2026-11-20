@@ -147,6 +147,43 @@ class StreakyApiTests {
   }
 
   @Test
+  void usernameLoginIsCaseInsensitiveAndDisplayNamePreservesCase() throws Exception {
+    var first = mvc.perform(get("/api/auth/csrf")).andExpect(status().isOk()).andReturn();
+    Cookie session = first.getResponse().getCookie("SESSION");
+    assertNotNull(session);
+    String csrf = body(first).get("token").asText();
+    String entered = "CaseUser" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+
+    mvc.perform(
+            post("/api/auth/register")
+                .cookie(session)
+                .header("X-CSRF-TOKEN", csrf)
+                .contentType("application/json")
+                .content(
+                    payload(
+                        Map.of(
+                            "username", entered,
+                            "password", "portfolio123",
+                            "timezone", "UTC"))))
+        .andExpect(status().isCreated())
+        .andExpect(jsonPath("$.username").value(entered.toLowerCase(Locale.ROOT)))
+        .andExpect(jsonPath("$.name").value(entered));
+
+    mvc.perform(
+            post("/api/auth/login")
+                .cookie(session)
+                .header("X-CSRF-TOKEN", csrf)
+                .contentType("application/json")
+                .content(
+                    payload(
+                        Map.of(
+                            "username", entered.toUpperCase(Locale.ROOT),
+                            "password", "portfolio123"))))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.name").value(entered));
+  }
+
+  @Test
   void counterBeyondGoalAndNewestActivity() throws Exception {
     Client c = client("UTC");
     String id = create(c, "counter", 5);

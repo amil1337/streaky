@@ -25,18 +25,20 @@ public class AuthService {
   }
 
   public User register(String username, String password, String timezone) {
-    String clean = username.trim().toLowerCase(Locale.ROOT);
+    String displayName = username.trim();
+    String clean = normalizeUsername(username);
     checkPassword(password);
     if (users.existsByUsername(clean))
       throw new ResponseStatusException(CONFLICT, "Username already exists");
-    return users.saveAndFlush(new User(clean, passwords.encode(password), zone(timezone, "UTC")));
+    return users.saveAndFlush(
+        new User(clean, displayName, passwords.encode(password), zone(timezone, "UTC")));
   }
 
   public User login(String username, String password) {
     checkPassword(password);
     User user =
         users
-            .findByUsername(username.trim().toLowerCase(Locale.ROOT))
+            .findByUsername(normalizeUsername(username))
             .orElseThrow(
                 () -> new ResponseStatusException(UNAUTHORIZED, "Invalid username or password"));
     if (!passwords.matches(password, user.getPasswordHash()))
@@ -69,5 +71,9 @@ public class AuthService {
   private void checkPassword(String value) {
     if (value.getBytes(StandardCharsets.UTF_8).length > 72)
       throw new ResponseStatusException(BAD_REQUEST, "Password must not exceed 72 UTF-8 bytes");
+  }
+
+  private String normalizeUsername(String value) {
+    return value.trim().toLowerCase(Locale.ROOT);
   }
 }

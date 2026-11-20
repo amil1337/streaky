@@ -27,9 +27,9 @@ public class User {
 
   protected User() {}
 
-  public User(String username, String passwordHash, String timezone) {
+  public User(String username, String displayName, String passwordHash, String timezone) {
     this.username = username;
-    this.displayName = username;
+    this.displayName = displayName;
     this.passwordHash = passwordHash;
     this.timezone = timezone;
   }
