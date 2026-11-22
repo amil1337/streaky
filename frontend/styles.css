@@ -1403,18 +1403,22 @@ dialog {
   box-shadow: 0 8px 30px #34304c04;
 }
 .wordmark {
-  display: inline-flex;
-  align-items: center;
-  width: 154px;
-  height: 52px;
+  position: relative;
+  display: block;
+  width: 84px;
+  height: 61px;
+  overflow: hidden;
   text-decoration: none;
   flex-shrink: 0;
 }
 .wordmark > img {
+  position: absolute;
   display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
+  width: 118%;
+  height: 162.6%;
+  max-width: none;
+  left: -8%;
+  top: -26%;
 }
 .wordmark:focus-visible {
   outline: 2px solid var(--theme-accent);
@@ -1604,8 +1608,8 @@ dialog {
     padding: 16px;
   }
   .wordmark {
-    width: 144px;
-    height: 48px;
+    width: 77px;
+    height: 56px;
   }
   .navbar .account {
     grid-column: 2;
