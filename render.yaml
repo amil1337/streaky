@@ -1,16 +1,50 @@
 services:
   - type: web
-    name: streaky
+    name: davamly
     runtime: docker
-    plan: free
-    autoDeployTrigger: commit
+    plan: 0.5c-512mb
+    region: frankfurt
+    numInstances: 1
+    autoDeployTrigger: checksPass
     healthCheckPath: /api/health
     envVars:
-      - key: DB_URL
-        sync: false
-      - key: DB_USER
-        sync: false
-      - key: DB_PASSWORD
-        sync: false
+      - key: SPRING_PROFILES_ACTIVE
+        value: production
+      - key: PORT
+        value: '10000'
       - key: COOKIE_SECURE
         value: 'true'
+      - key: ALLOWED_ORIGINS
+        value: ''
+      - key: DB_POOL_MAX_SIZE
+        value: '5'
+      - key: DB_POOL_MIN_IDLE
+        value: '0'
+      - key: DB_HOST
+        fromDatabase:
+          name: davamly-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: davamly-db
+          property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: davamly-db
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: davamly-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: davamly-db
+          property: password
+
+databases:
+  - name: davamly-db
+    plan: 0.1c-256mb
+    region: frankfurt
+    postgresMajorVersion: '17'
+    databaseName: davamly
+    ipAllowList: []

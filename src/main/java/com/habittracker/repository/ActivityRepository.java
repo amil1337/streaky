@@ -4,9 +4,13 @@ import com.habittracker.model.ActivityEvent;
 import java.util.UUID;
 import org.springframework.data.domain.*;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
 
 public interface ActivityRepository extends JpaRepository<ActivityEvent, Long> {
   Page<ActivityEvent> findByUserId(UUID userId, Pageable pageable);
 
-  long deleteByUserId(UUID userId);
+  @Modifying
+  @Query("delete from ActivityEvent e where e.userId = :userId")
+  void deleteByUserId(UUID userId);
 }

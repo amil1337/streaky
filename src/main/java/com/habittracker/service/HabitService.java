@@ -28,22 +28,43 @@ public class HabitService {
   }
 
   public HabitResponse create(UUID userId, CreateHabitRequest r) {
-    User user = auth.getUser(userId);
+    User user = auth.lockUser(userId);
     HabitType type =
         r.kind() != null
             ? r.kind()
             : r.target() != null && r.target() > 1 ? HabitType.COUNTER : HabitType.COMPLETION;
     int target = r.target() == null ? 5 : r.target();
-    Habit h = habits.save(new Habit(r.name(), r.description(), type, target, r.unit(), user));
+    boolean makeDefault = Boolean.TRUE.equals(r.defaultHabit()) || habits.countByUser_Id(userId) == 0;
+    Habit h =
+        habits.save(
+            new Habit(
+                r.name(),
+                r.description(),
+                type,
+                target,
+                r.unit(),
+                color(r.color(), "#FF3434"),
+                makeDefault,
+                127,
+                user));
+    if (makeDefault) habits.clearOtherDefaults(userId, h.getId());
     return HabitResponse.from(h, 0);
   }
 
   @Transactional(readOnly = true)
   public List<HabitResponse> getUserHabits(UUID userId) {
-    return habits.findAllByUser_IdOrderByNameAsc(userId).stream().map(this::response).toList();
+    List<Habit> owned = habits.findAllByUser_IdOrderByDefaultHabitDescNameAsc(userId);
+    if (owned.isEmpty()) return List.of();
+    LocalDate day = LocalDate.now(clock.withZone(ZoneId.of(owned.getFirst().getUser().getTimezone())));
+    Map<UUID, Integer> counts = new HashMap<>();
+    for (HabitProgress entry : progress.findOwnedOnDate(userId, day)) {
+      counts.put(entry.getHabit().getId(), entry.getCount());
+    }
+    return owned.stream().map(h -> HabitResponse.from(h, counts.getOrDefault(h.getId(), 0))).toList();
   }
 
   public HabitResponse update(UUID userId, UUID habitId, UpdateHabitRequest r) {
+    auth.lockUser(userId);
     Habit h = lock(userId, habitId);
     HabitType kind = r.kind() == null ? h.getKind() : r.kind();
     if (kind != h.getKind() && progress.existsByHabit_IdAndCountGreaterThan(habitId, 0))
@@ -53,12 +74,27 @@ public class HabitService {
         r.description() == null ? h.getDescription() : r.description(),
         kind,
         r.target() == null ? h.getDailyTarget() : r.target(),
-        r.unit() == null ? h.getUnit() : r.unit());
+        r.unit() == null ? h.getUnit() : r.unit(),
+        color(r.color(), h.getColor()),
+        127);
+    if (r.defaultHabit() != null) {
+      h.setDefaultHabit(r.defaultHabit());
+      if (r.defaultHabit()) habits.clearOtherDefaults(userId, h.getId());
+    }
     return response(h);
   }
 
   public void delete(UUID userId, UUID habitId) {
-    habits.delete(lock(userId, habitId));
+    auth.lockUser(userId);
+    Habit h = lock(userId, habitId);
+    boolean wasDefault = h.isDefaultHabit();
+    habits.delete(h);
+    habits.flush();
+    if (wasDefault && !habits.existsByUser_IdAndDefaultHabitTrue(userId)) {
+      habits.findAllByUser_IdOrderByDefaultHabitDescNameAsc(userId).stream()
+          .findFirst()
+          .ifPresent(next -> next.setDefaultHabit(true));
+    }
   }
 
   private Habit lock(UUID uid, UUID id) {
@@ -73,4 +109,9 @@ public class HabitService {
         progress.findByHabit_IdAndDate(h.getId(), day).map(HabitProgress::getCount).orElse(0);
     return HabitResponse.from(h, count);
   }
+
+  private String color(String value, String fallback) {
+    return value == null || value.isBlank() ? fallback : value.toUpperCase(Locale.ROOT);
+  }
+
 }

@@ -19,6 +19,9 @@ public class User {
   @Column(nullable = false, length = 40)
   private String displayName;
 
+  @Column(name = "username_label", length = 40)
+  private String usernameLabel;
+
   @Column(nullable = false, length = 240)
   private String bio = "";
 
@@ -35,9 +38,23 @@ public class User {
   }
 
   public void update(String name, String bio, String timezone) {
-    this.displayName = name.trim();
+    if (name != null) this.displayName = name.trim();
     this.bio = bio == null ? "" : bio.trim();
     this.timezone = timezone;
+  }
+
+  public void updateUsername(String username, String label) {
+    this.username = username;
+    this.usernameLabel = label;
+  }
+
+  public void updatePassword(String passwordHash) {
+    this.passwordHash = passwordHash;
+  }
+
+  public String getPublicUsername() {
+    if (usernameLabel != null) return usernameLabel;
+    return username.equalsIgnoreCase(displayName) ? displayName : username;
   }
 
   public UUID getId() {

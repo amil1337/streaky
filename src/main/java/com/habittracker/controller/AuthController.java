@@ -6,12 +6,17 @@ import com.habittracker.service.AuthService;
 import jakarta.servlet.http.*;
 import jakarta.validation.Valid;
 import java.util.*;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.web.context.SecurityContextRepository;
+import org.springframework.security.web.csrf.CsrfAuthenticationStrategy;
 import org.springframework.security.web.csrf.CsrfToken;
+import org.springframework.security.web.csrf.CsrfTokenRepository;
+import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -20,17 +25,22 @@ public class AuthController {
   private final AuthService auth;
   private final AuthRateLimiter rateLimiter;
   private final SecurityContextRepository contexts;
+  private final CsrfAuthenticationStrategy csrfAuthentication;
 
   public AuthController(
-      AuthService auth, AuthRateLimiter rateLimiter, SecurityContextRepository contexts) {
+      AuthService auth, AuthRateLimiter rateLimiter, SecurityContextRepository contexts,
+      CsrfTokenRepository csrfTokens) {
     this.auth = auth;
     this.rateLimiter = rateLimiter;
     this.contexts = contexts;
+    this.csrfAuthentication = new CsrfAuthenticationStrategy(csrfTokens);
+    this.csrfAuthentication.setRequestHandler(new CsrfTokenRequestAttributeHandler());
   }
 
   @GetMapping("/csrf")
-  public Map<String, String> csrf(CsrfToken token) {
-    return Map.of("token", token.getToken(), "headerName", token.getHeaderName());
+  public ResponseEntity<Map<String, String>> csrf(CsrfToken token) {
+    return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+        .body(Map.of("token", token.getToken(), "headerName", token.getHeaderName()));
   }
 
   @PostMapping("/register")
@@ -56,6 +66,7 @@ public class AuthController {
         UsernamePasswordAuthenticationToken.authenticated(
             user.getId(), null, List.of(new SimpleGrantedAuthority("ROLE_USER"))));
     SecurityContextHolder.setContext(context);
+    csrfAuthentication.onAuthentication(context.getAuthentication(), request, response);
     contexts.saveContext(context, request, response);
     return UserResponse.from(user);
   }

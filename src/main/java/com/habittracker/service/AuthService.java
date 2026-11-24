@@ -18,10 +18,12 @@ import org.springframework.web.server.ResponseStatusException;
 public class AuthService {
   private final UserRepository users;
   private final BCryptPasswordEncoder passwords;
+  private final String unknownUserHash;
 
   public AuthService(UserRepository users, BCryptPasswordEncoder passwords) {
     this.users = users;
     this.passwords = passwords;
+    this.unknownUserHash = passwords.encode(UUID.randomUUID().toString());
   }
 
   public User register(String username, String password, String timezone) {
@@ -34,14 +36,12 @@ public class AuthService {
         new User(clean, displayName, passwords.encode(password), zone(timezone, "UTC")));
   }
 
+  @Transactional(readOnly = true)
   public User login(String username, String password) {
     checkPassword(password);
-    User user =
-        users
-            .findByUsername(normalizeUsername(username))
-            .orElseThrow(
-                () -> new ResponseStatusException(UNAUTHORIZED, "Invalid username or password"));
-    if (!passwords.matches(password, user.getPasswordHash()))
+    User user = users.findByUsername(normalizeUsername(username)).orElse(null);
+    String hash = user == null ? unknownUserHash : user.getPasswordHash();
+    if (!passwords.matches(password, hash) || user == null)
       throw new ResponseStatusException(UNAUTHORIZED, "Invalid username or password");
     return user;
   }
@@ -53,10 +53,38 @@ public class AuthService {
         .orElseThrow(() -> new ResponseStatusException(UNAUTHORIZED, "Login required"));
   }
 
+  public User lockUser(UUID id) {
+    return users.lockById(id)
+        .orElseThrow(() -> new ResponseStatusException(UNAUTHORIZED, "Login required"));
+  }
+
   public User updateProfile(UUID id, ProfileRequest request) {
-    User user = getUser(id);
-    user.update(request.name(), request.bio(), zone(request.timezone(), user.getTimezone()));
+    User user = lockUser(id);
+    if (request.username() != null) {
+      String key = normalizeUsername(request.username());
+      if (!key.equals(user.getUsername()) && users.existsByUsername(key))
+        throw new ResponseStatusException(CONFLICT, "Username already exists");
+      user.updateUsername(key, request.username());
+    }
+    if (request.name() != null && request.name().isBlank())
+      throw new ResponseStatusException(BAD_REQUEST, "Name cannot be blank");
+    user.update(
+        request.name(), request.bio() == null ? user.getBio() : request.bio(),
+        zone(request.timezone(), user.getTimezone()));
     return user;
+  }
+
+  public void changePassword(UUID id, String currentPassword, String newPassword) {
+    User user = lockUser(id);
+    verifyPassword(user, currentPassword);
+    checkPassword(newPassword);
+    user.updatePassword(passwords.encode(newPassword));
+  }
+
+  void verifyPassword(User user, String password) {
+    checkPassword(password);
+    if (!passwords.matches(password, user.getPasswordHash()))
+      throw new ResponseStatusException(UNAUTHORIZED, "Invalid password");
   }
 
   private String zone(String value, String fallback) {

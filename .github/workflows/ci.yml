@@ -1,0 +1,79 @@
+name: Production verification
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUN_POSTGRES_IT: 'true'
+      DB_HOST: 127.0.0.1
+      DB_PORT: '55432'
+      DB_NAME: davamly_it
+      DB_USER: app_readiness
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Start disposable PostgreSQL
+        run: |
+          postgres_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$postgres_password"
+          echo "DB_PASSWORD=$postgres_password" >> "$GITHUB_ENV"
+          export POSTGRES_PASSWORD="$postgres_password"
+          docker network create davamly-ci
+          docker run -d --name davamly-pg --network davamly-ci \
+            -p 127.0.0.1:55432:5432 -e POSTGRES_PASSWORD \
+            -e POSTGRES_USER="$DB_USER" -e POSTGRES_DB="$DB_NAME" postgres:17-alpine
+          for attempt in {1..40}; do
+            if docker exec davamly-pg pg_isready -h 127.0.0.1 -U "$DB_USER" -d "$DB_NAME"; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+      - name: Verify on Java 21 against PostgreSQL
+        run: |
+          java -version
+          ./mvnw -B -ntp clean verify
+          test -s target/davamly.jar
+      - name: Build and smoke-test production image
+        run: |
+          docker build --pull -t davamly:ci .
+          docker exec davamly-pg createdb -U "$DB_USER" davamly_container
+          docker run -d --name davamly-app --network davamly-ci \
+            -p 127.0.0.1:18080:8080 -e DB_HOST=davamly-pg -e DB_PORT=5432 \
+            -e DB_NAME=davamly_container -e DB_USER -e DB_PASSWORD davamly:ci
+          for attempt in {1..60}; do
+            state="$(docker inspect --format '{{.State.Health.Status}}' davamly-app)"
+            if [ "$state" = healthy ]; then
+              python3 scripts/smoke.py http://127.0.0.1:18080 --loopback-http
+              exit 0
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' davamly-app)" = false ]; then
+              break
+            fi
+            sleep 2
+          done
+          exit 1
+      - name: Show application logs on failure
+        if: failure()
+        run: docker logs --tail 120 davamly-app || true
+      - name: Remove test containers
+        if: always()
+        run: |
+          docker rm -f davamly-app davamly-pg || true
+          docker network rm davamly-ci || true

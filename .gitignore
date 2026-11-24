@@ -36,6 +36,13 @@ build/
 .data/
 .env
 .env.*
+!.env.example
+*.jks
+*.p12
+*.pfx
+*.key
+*.pem
+*.log
 *.mv.db
 *.trace.db
 node_modules/

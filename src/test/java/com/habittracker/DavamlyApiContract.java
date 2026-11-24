@@ -17,6 +17,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.*;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.*;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestExecutionListeners;
 import org.springframework.test.context.support.DependencyInjectionTestExecutionListener;
 import org.springframework.test.web.servlet.*;
@@ -24,17 +25,15 @@ import tools.jackson.databind.*;
 
 @SpringBootTest(
     properties = {
-      "spring.datasource.url=jdbc:h2:mem:api_test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000",
-      "spring.jpa.hibernate.ddl-auto=create-drop",
       "app.allowed-origins=https://portfolio.example",
       "app.auth-rate-limit.enabled=false"
     })
 @AutoConfigureMockMvc
-@Import(StreakyApiTests.TimeConfig.class)
+@Import(DavamlyApiContract.TimeConfig.class)
 @TestExecutionListeners(
     listeners = DependencyInjectionTestExecutionListener.class,
     mergeMode = TestExecutionListeners.MergeMode.REPLACE_DEFAULTS)
-class StreakyApiTests {
+abstract class DavamlyApiContract {
   @TestConfiguration
   static class TimeConfig {
     @Bean
@@ -51,6 +50,7 @@ class StreakyApiTests {
   @Autowired ProgressService progress;
   @Autowired ActivityService activity;
   @Autowired UserRepository users;
+  @Autowired JdbcTemplate jdbc;
 
   record Client(Cookie session, String csrf) {}
 
@@ -90,7 +90,27 @@ class StreakyApiTests {
     Cookie rotated = loggedIn.getResponse().getCookie("SESSION");
     assertNotNull(rotated);
     assertNotEquals(old, rotated.getValue());
-    return new Client(rotated, csrf);
+    mvc.perform(get("/api/auth/me").cookie(session)).andExpect(status().isUnauthorized());
+    var tokens = mvc.perform(get("/api/auth/csrf").cookie(rotated))
+        .andExpect(header().string("Cache-Control", "no-store")).andReturn();
+    String fresh = body(tokens).get("token").asText();
+    assertNotEquals(csrf, fresh);
+    return new Client(rotated, fresh);
+  }
+
+  Client login(String username) throws Exception {
+    var first = mvc.perform(get("/api/auth/csrf")).andExpect(status().isOk()).andReturn();
+    Cookie session = first.getResponse().getCookie("SESSION");
+    String token = body(first).get("token").asText();
+    var loggedIn = mvc.perform(post("/api/auth/login")
+            .cookie(session).header("X-CSRF-TOKEN", token).contentType("application/json")
+            .content(payload(Map.of("username", username, "password", "portfolio123"))))
+        .andExpect(status().isOk()).andReturn();
+    Cookie rotated = loggedIn.getResponse().getCookie("SESSION");
+    mvc.perform(post("/api/auth/logout").cookie(rotated).header("X-CSRF-TOKEN", token))
+        .andExpect(status().isForbidden());
+    var csrf = mvc.perform(get("/api/auth/csrf").cookie(rotated)).andReturn();
+    return new Client(rotated, body(csrf).get("token").asText());
   }
 
   String create(Client c, String kind, int target) throws Exception {
@@ -140,10 +160,12 @@ class StreakyApiTests {
                 .header("X-CSRF-TOKEN", c.csrf)
                 .contentType("application/json")
                 .content(payload(Map.of("name", " ", "target", 0))))
-        .andExpect(status().isBadRequest());
+        .andExpect(status().isBadRequest())
+        .andExpect(content().contentTypeCompatibleWith("application/problem+json"))
+        .andExpect(jsonPath("$.detail").isString());
     mvc.perform(post("/api/auth/logout").cookie(c.session).header("X-CSRF-TOKEN", c.csrf))
         .andExpect(status().isNoContent());
-    mvc.perform(get("/api/auth/me")).andExpect(status().isUnauthorized());
+    mvc.perform(get("/api/auth/me").cookie(c.session)).andExpect(status().isUnauthorized());
   }
 
   @Test
@@ -153,6 +175,13 @@ class StreakyApiTests {
     assertNotNull(session);
     String csrf = body(first).get("token").asText();
     String entered = "CaseUser" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    for (String name : List.of(entered, entered + "x")) {
+      mvc.perform(post("/api/auth/login").cookie(session).header("X-CSRF-TOKEN", csrf)
+              .contentType("application/json")
+              .content(payload(Map.of("username", name, "password", "invalid-example"))))
+          .andExpect(status().isUnauthorized())
+          .andExpect(jsonPath("$.detail").value("Invalid username or password"));
+    }
 
     mvc.perform(
             post("/api/auth/register")
@@ -167,6 +196,7 @@ class StreakyApiTests {
                             "timezone", "UTC"))))
         .andExpect(status().isCreated())
         .andExpect(jsonPath("$.username").value(entered.toLowerCase(Locale.ROOT)))
+        .andExpect(jsonPath("$.usernameLabel").value(entered))
         .andExpect(jsonPath("$.name").value(entered));
 
     mvc.perform(
@@ -200,6 +230,13 @@ class StreakyApiTests {
             mvc.perform(get("/api/activity").cookie(c.session).param("size", "2"))
                 .andExpect(status().isOk())
                 .andReturn());
+    mvc.perform(get("/api/activity").cookie(c.session).param("page", "1").param("size", "2"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.items.length()").value(2))
+        .andExpect(jsonPath("$.items[0].count").value(5));
+    mvc.perform(get("/api/activity").cookie(c.session).param("page", "2147483647").param("size", "100"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.detail").value("Page offset is too large"));
     assertEquals(7, events.get("totalElements").asInt());
     assertTrue(events.get("hasNext").asBoolean());
     assertEquals("decrement", events.get("items").get(0).get("action").asText());
@@ -268,6 +305,11 @@ class StreakyApiTests {
                 .contentType("application/json")
                 .content(payload(Map.of("name", "Water", "kind", "completion"))))
         .andExpect(status().isConflict());
+    mvc.perform(put("/api/habits/" + id).cookie(a.session).header("X-CSRF-TOKEN", a.csrf)
+            .contentType("application/json").content(payload(Map.of("name", "Updated", "target", 7))))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.name").value("Updated"))
+        .andExpect(jsonPath("$.target").value(7)).andExpect(jsonPath("$.todayCount").value(0));
+    mvc.perform(get("/api/habits/" + id + "/statistics").cookie(b.session)).andExpect(status().isNotFound());
     mvc.perform(delete("/api/habits/" + id).cookie(a.session).header("X-CSRF-TOKEN", a.csrf))
         .andExpect(status().isNoContent());
     mvc.perform(get("/api/habits").cookie(a.session)).andExpect(jsonPath("$.length()").value(0));
@@ -289,11 +331,24 @@ class StreakyApiTests {
                 .get("id")
                 .asText());
 
-    mvc.perform(delete("/api/users/me").cookie(c.session).header("X-CSRF-TOKEN", c.csrf))
+    Client other = login(users.findById(userId).orElseThrow().getUsername());
+    assertEquals(2, jdbc.queryForObject("select count(*) from spring_session where principal_name = ?", Integer.class, userId.toString()));
+    mvc.perform(delete("/api/users/me").cookie(c.session).header("X-CSRF-TOKEN", c.csrf)
+            .contentType("application/json").content(payload(Map.of("currentPassword", "invalid-example"))))
+        .andExpect(status().isUnauthorized());
+    assertTrue(users.existsById(userId));
+    mvc.perform(delete("/api/users/me").cookie(c.session).header("X-CSRF-TOKEN", c.csrf)
+            .contentType("application/json").content(payload(Map.of("currentPassword", "portfolio123"))))
         .andExpect(status().isNoContent());
 
     assertFalse(users.existsById(userId));
+    assertEquals(0, jdbc.queryForObject("select count(*) from spring_session where principal_name = ?", Integer.class, userId.toString()));
+    assertEquals(0, jdbc.queryForObject("select count(*) from habits where user_id = ?", Integer.class, userId));
+    assertEquals(0, jdbc.queryForObject("select count(*) from activity_events where user_id = ?", Integer.class, userId));
+    assertEquals(0, jdbc.queryForObject("select count(*) from habit_progress where habit_id = ?", Integer.class, UUID.fromString(habitId)));
     mvc.perform(get("/api/auth/me").cookie(c.session)).andExpect(status().isUnauthorized());
+    mvc.perform(get("/api/habits").cookie(other.session)).andExpect(status().isUnauthorized());
+    mvc.perform(get("/api/activity").cookie(other.session)).andExpect(status().isUnauthorized());
   }
 
   @Test
@@ -356,8 +411,50 @@ class StreakyApiTests {
         futures.add(pool.submit(() -> progress.increment(user.getId(), h.id())));
       for (var f : futures) f.get(15, TimeUnit.SECONDS);
     }
-    assertEquals(12, habits.getUserHabits(user.getId()).getFirst().todayCount());
+    var other = habits.create(
+        user.getId(), new CreateHabitRequest("Untracked", "", HabitType.COUNTER, 5, "times"));
+    var list = habits.getUserHabits(user.getId());
+    assertEquals(h.id(), list.getFirst().id());
+    assertEquals(12, list.getFirst().todayCount());
+    assertEquals(other.id(), list.getLast().id());
+    assertEquals(0, list.getLast().todayCount());
     assertEquals(12, activity.getActivity(user.getId(), 0, 30).totalElements());
+  }
+
+  @Test
+  void redesignedProfileAndHabitPreferencesAreBackedByTheApi() throws Exception {
+    Client c = client("UTC");
+    String first = create(c, "counter", 3);
+    String second = create(c, "completion", 1);
+    mvc.perform(put("/api/habits/" + second).cookie(c.session).header("X-CSRF-TOKEN", c.csrf)
+            .contentType("application/json").content(payload(
+                Map.of("name", "Stretch", "color", "#2f80ed", "defaultHabit", true))))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.color").value("#2F80ED"))
+        .andExpect(jsonPath("$.weeklyGoal").value(7));
+    mvc.perform(get("/api/habits").cookie(c.session))
+        .andExpect(jsonPath("$[0].id").value(second))
+        .andExpect(jsonPath("$[0].defaultHabit").value(true))
+        .andExpect(jsonPath("$[1].id").value(first))
+        .andExpect(jsonPath("$[1].defaultHabit").value(false));
+    mvc.perform(get("/api/users/me/statistics").cookie(c.session))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.totalHabits").value(2));
+
+    String renamed = "Renamed" + UUID.randomUUID().toString().substring(0, 8);
+    mvc.perform(patch("/api/users/me").cookie(c.session).header("X-CSRF-TOKEN", c.csrf)
+            .contentType("application/json").content(payload(Map.of("username", renamed))))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.username").value(renamed.toLowerCase(Locale.ROOT)))
+        .andExpect(jsonPath("$.usernameLabel").value(renamed));
+    Client secondSession = login(renamed.toLowerCase(Locale.ROOT));
+    mvc.perform(put("/api/users/me/password").cookie(c.session).header("X-CSRF-TOKEN", c.csrf)
+            .contentType("application/json").content(payload(
+                Map.of("currentPassword", "portfolio123", "newPassword", "fixture-updated-password"))))
+        .andExpect(status().isNoContent());
+    mvc.perform(get("/api/auth/me").cookie(c.session)).andExpect(status().isUnauthorized());
+    mvc.perform(get("/api/auth/me").cookie(secondSession.session)).andExpect(status().isUnauthorized());
+    assertThrows(org.springframework.web.server.ResponseStatusException.class,
+        () -> auth.login(renamed, "portfolio123"));
+    assertEquals(renamed, auth.login(renamed, "fixture-updated-password").getPublicUsername());
   }
 
   @Test
@@ -365,7 +462,11 @@ class StreakyApiTests {
     mvc.perform(get("/index.html"))
         .andExpect(status().isOk())
         .andExpect(content().contentTypeCompatibleWith("text/html"))
-        .andExpect(content().string(org.hamcrest.Matchers.containsString("id=\"auth-form\"")));
+        .andExpect(content().string(org.hamcrest.Matchers.containsString("habit tracking made simple")));
+    for (String page : List.of("/", "/login", "/signup", "/app", "/profile", "/activity")) {
+      mvc.perform(get(page)).andExpect(status().isOk()).andExpect(forwardedUrl("/index.html"));
+    }
+    mvc.perform(get("/assets/davamly-logo.png")).andExpect(status().isOk());
     mvc.perform(get("/app.js"))
         .andExpect(status().isOk())
         .andExpect(content().string(org.hamcrest.Matchers.containsString("/api/auth/login")));
