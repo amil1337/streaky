@@ -11,6 +11,10 @@ public interface HabitRepository extends JpaRepository<Habit, UUID> {
   Optional<Habit> findByIdAndUser_Id(UUID id, UUID userId);
 
   @Lock(LockModeType.PESSIMISTIC_WRITE)
+  @Query("select h from Habit h where h.user.id = :userId order by h.id")
+  List<Habit> lockAllOwned(UUID userId);
+
+  @Lock(LockModeType.PESSIMISTIC_WRITE)
   @Query("select h from Habit h where h.id=:habitId and h.user.id=:userId")
   Optional<Habit> lockOwned(UUID habitId, UUID userId);
 }

@@ -1,14 +1,20 @@
 package com.habittracker.config;
 
 import com.habittracker.repository.UserRepository;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
 import java.util.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.*;
+import org.springframework.security.authorization.AuthorizationDecision;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.core.userdetails.*;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.context.*;
+import org.springframework.security.web.csrf.CsrfException;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
+import org.springframework.security.web.csrf.CsrfTokenRepository;
+import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter.ReferrerPolicy;
 import org.springframework.web.cors.*;
 
@@ -20,23 +26,16 @@ public class SecurityConfig {
   }
 
   @Bean
-  public UserDetailsService userDetailsService(UserRepository users) {
-    return name ->
-        users
-            .findByUsername(name)
-            .map(
-                u ->
-                    org.springframework.security.core.userdetails.User.withUsername(u.getUsername())
-                        .password(u.getPasswordHash())
-                        .roles("USER")
-                        .build())
-            .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+  public CsrfTokenRepository csrfTokens() {
+    return new HttpSessionCsrfTokenRepository();
   }
 
   @Bean
   public SecurityFilterChain security(
       HttpSecurity http,
       SecurityContextRepository contexts,
+      CsrfTokenRepository csrfTokens,
+      UserRepository users,
       @org.springframework.beans.factory.annotation.Qualifier("cors")
           CorsConfigurationSource corsSource)
       throws Exception {
@@ -50,11 +49,16 @@ public class SecurityConfig {
                         "/api/auth/login")
                     .permitAll()
                     .requestMatchers("/api/**")
-                    .authenticated()
+                    .access((authentication, request) -> {
+                      Object principal = authentication.get().getPrincipal();
+                      return new AuthorizationDecision(
+                          principal instanceof UUID id && users.existsById(id));
+                    })
                     .anyRequest()
                     .permitAll())
         .securityContext(c -> c.securityContextRepository(contexts))
-        .csrf(c -> c.csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
+        .csrf(c -> c.csrfTokenRepository(csrfTokens)
+            .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
         .cors(c -> c.configurationSource(corsSource))
         .headers(
             h ->
@@ -77,8 +81,26 @@ public class SecurityConfig {
         .httpBasic(c -> c.disable())
         .logout(c -> c.disable())
         .exceptionHandling(
-            c -> c.authenticationEntryPoint((req, res, e) -> res.sendError(401, "Login required")));
+            c -> c
+                .authenticationEntryPoint((req, res, e) -> problem(res, 401, "Login required"))
+                .accessDeniedHandler((req, res, e) -> {
+                  var authentication = SecurityContextHolder.getContext().getAuthentication();
+                  if (!(e instanceof CsrfException)
+                      && authentication != null && authentication.getPrincipal() instanceof UUID) {
+                    problem(res, 401, "Login required");
+                  } else {
+                    problem(res, 403, "Request forbidden");
+                  }
+                }));
     return http.build();
+  }
+
+  private void problem(HttpServletResponse response, int status, String detail) throws IOException {
+    response.setStatus(status);
+    response.setContentType("application/problem+json");
+    response.getWriter().write("""
+        {"status":%d,"detail":"%s"}
+        """.formatted(status, detail));
   }
 
   @Bean

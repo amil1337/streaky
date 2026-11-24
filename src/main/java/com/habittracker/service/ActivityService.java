@@ -22,6 +22,8 @@ public class ActivityService {
   public ActivityPage getActivity(UUID user, int page, int size) {
     if (page < 0 || size < 1 || size > 100)
       throw new ResponseStatusException(BAD_REQUEST, "Page must be >=0 and size 1–100");
+    if ((long) page * size > Integer.MAX_VALUE)
+      throw new ResponseStatusException(BAD_REQUEST, "Page offset is too large");
     var result =
         events.findByUserId(user, PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "id")));
     return new ActivityPage(

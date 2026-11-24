@@ -6,6 +6,9 @@ import com.habittracker.service.AuthService;
 import jakarta.servlet.http.HttpSession;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.session.FindByIndexNameSessionRepository;
+import org.springframework.session.Session;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -14,9 +17,14 @@ public class ProfileController {
   private final AuthService auth;
   private final AccountService accounts;
 
-  public ProfileController(AuthService auth, AccountService accounts) {
+  private final FindByIndexNameSessionRepository<? extends Session> sessions;
+
+  public ProfileController(
+      AuthService auth, AccountService accounts,
+      FindByIndexNameSessionRepository<? extends Session> sessions) {
     this.auth = auth;
     this.accounts = accounts;
+    this.sessions = sessions;
   }
 
   @PatchMapping
@@ -27,7 +35,10 @@ public class ProfileController {
   @DeleteMapping
   @ResponseStatus(HttpStatus.NO_CONTENT)
   public void delete(HttpSession session) {
-    accounts.delete(SessionUser.id(session));
+    var userId = SessionUser.id(session);
+    accounts.delete(userId);
     session.invalidate();
+    SecurityContextHolder.clearContext();
+    sessions.findByPrincipalName(userId.toString()).keySet().forEach(sessions::deleteById);
   }
 }

@@ -28,7 +28,7 @@ public class HabitService {
   }
 
   public HabitResponse create(UUID userId, CreateHabitRequest r) {
-    User user = auth.getUser(userId);
+    User user = auth.lockUser(userId);
     HabitType type =
         r.kind() != null
             ? r.kind()
@@ -40,7 +40,15 @@ public class HabitService {
 
   @Transactional(readOnly = true)
   public List<HabitResponse> getUserHabits(UUID userId) {
-    return habits.findAllByUser_IdOrderByNameAsc(userId).stream().map(this::response).toList();
+    List<Habit> owned = habits.findAllByUser_IdOrderByNameAsc(userId);
+    if (owned.isEmpty()) return List.of();
+
+    LocalDate day = LocalDate.now(clock.withZone(ZoneId.of(owned.getFirst().getUser().getTimezone())));
+    Map<UUID, Integer> counts = new HashMap<>();
+    for (HabitProgress entry : progress.findOwnedOnDate(userId, day)) {
+      counts.put(entry.getHabit().getId(), entry.getCount());
+    }
+    return owned.stream().map(h -> HabitResponse.from(h, counts.getOrDefault(h.getId(), 0))).toList();
   }
 
   public HabitResponse update(UUID userId, UUID habitId, UpdateHabitRequest r) {
