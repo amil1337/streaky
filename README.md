@@ -53,7 +53,8 @@ python scripts/smoke.py http://127.0.0.1:8080 --loopback-http
 | --- | --- |
 | `SPRING_PROFILES_ACTIVE` | Set to `production` for hosting. The image sets it by default. |
 | `PORT` | HTTP port. Defaults to `8080`. The Render Blueprint sets `10000`. |
-| `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | Required in production. The app uses PostgreSQL and passes the username and password separately to the driver. |
+| `DATABASE_URL` | Managed Heroku Postgres connection variable. When set in production, the app derives PostgreSQL JDBC settings, passes credentials separately and requires TLS. |
+| `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | Required when production uses individual database variables, as on Render. |
 | `DB_PORT` | Production PostgreSQL port. Defaults to `5432`. |
 | `DB_URL`, `DB_USER`, `DB_PASSWORD` | Optional JDBC override and credentials for local development. `DB_URL` is ignored by the production datasource. |
 | `DB_POOL_MAX_SIZE`, `DB_POOL_MIN_IDLE` | Hikari pool limits. Defaults are `5` and `0`. Connection acquisition times out after 10 seconds. Production sets a 5-second driver connect timeout and a 30-second socket timeout. |
@@ -69,6 +70,15 @@ Keep `.env`, database files and secret values out of Git and build contexts. Use
 Flyway applies V1 (application tables) and V2 (JDBC sessions) before Hibernate validates the mapped schema. Add schema changes as new versioned migrations. Leave applied SQL files intact. Automatic baseline is disabled in production. For an existing schema without Flyway history, compare it with V1 and agree on an explicit baseline after a backup.
 
 `GET /api/health` checks that the HTTP application is alive. `GET /api/ready` checks a live database query and returns `503` when the database is unavailable. Account deletion removes the account's habits, progress, activity and sessions. Individual habit deletion removes its progress and preserves activity snapshots.
+
+### Heroku
+
+1. Use the existing Heroku app. Verify its attached PostgreSQL database, its `DATABASE_URL` attachment, and Flyway history before releasing. Back up existing PostgreSQL data before the first upgrade.
+2. Open the app's Deploy tab. With GitHub deployment enabled, select `amil1337/davamly` and manually deploy the reviewed branch. The `Procfile` selects the production profile. Heroku supplies `PORT`, Java 21 is selected in `system.properties`, and the application takes database credentials from the managed attachment.
+3. Check the build and runtime logs for Java 21 and successful Flyway migration or validation. Verify `/api/health` and `/api/ready`. Run `python scripts/smoke.py https://<heroku-app-host>`.
+4. If an application rollback is needed, roll back to the previous healthy Heroku release and recheck the endpoints. V1 and V2 are unchanged. Plan any separate database recovery against the backup.
+
+[Heroku GitHub deploys](https://devcenter.heroku.com/articles/github-integration) · [Heroku PostgreSQL connection guide](https://devcenter.heroku.com/articles/connecting-heroku-postgres)
 
 ### Render
 
