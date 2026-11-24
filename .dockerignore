@@ -6,5 +6,10 @@ target
 *.log
 .env
 .env.*
+*.jks
+*.p12
+*.pfx
+*.key
+*.pem
 work
 outputs
