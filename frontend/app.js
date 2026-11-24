@@ -1,8 +1,9 @@
-/* streaky frontend — the Spring Boot API is the source of truth. */
+/* davamly frontend */
 (() => {
   'use strict';
   const $ = (id) => document.getElementById(id);
-  const UI_KEY = 'streaky.ui.v1';
+  const UI_KEY = 'davamly.ui.v1';
+  const LEGACY_UI_KEY = 'streaky.ui.v1';
   const palettes = [
     {
       name: 'Cloud',
@@ -38,9 +39,14 @@
     t && themeKeys.every((k) => typeof t[k] === 'string' && /^#[0-9a-f]{6}$/i.test(t[k]));
   let ui = { theme: { ...palettes[0] }, views: {} };
   try {
-    const saved = JSON.parse(localStorage.getItem(UI_KEY));
+    const current = localStorage.getItem(UI_KEY);
+    const legacy = current === null ? localStorage.getItem(LEGACY_UI_KEY) : null;
+    const saved = JSON.parse(current ?? legacy);
     if (saved && validTheme(saved.theme)) ui.theme = saved.theme;
     if (saved?.views && typeof saved.views === 'object') ui.views = saved.views;
+    if (legacy !== null && saved && typeof saved === 'object') {
+      localStorage.setItem(UI_KEY, JSON.stringify(ui));
+    }
   } catch {}
 
   const state = {
@@ -276,7 +282,7 @@
     document
       .querySelectorAll('[data-page]')
       .forEach((link) => link.toggleAttribute('aria-current', link.dataset.page === page));
-    document.title = `${page[0].toUpperCase() + page.slice(1)} — streaky`;
+    document.title = `${page[0].toUpperCase() + page.slice(1)} — davamly`;
     renderCards();
     renderActivity();
   }
@@ -842,7 +848,7 @@
     $('auth-password').autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
     showAuthError();
     if (updateHash) history.replaceState(null, '', mode === 'signup' ? '#signup' : '#login');
-    document.title = `${mode === 'signup' ? 'Create account' : 'Sign in'} — streaky`;
+    document.title = `${mode === 'signup' ? 'Create account' : 'Sign in'} — davamly`;
   }
   $('auth-mode').onclick = () => setAuthMode(authMode === 'login' ? 'signup' : 'login');
   $('auth-form').onsubmit = async (event) => {

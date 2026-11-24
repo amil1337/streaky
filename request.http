@@ -3,19 +3,24 @@ GET http://localhost:8080/api/auth/csrf
 
 > {% client.global.set("csrf", response.body.token); %}
 
-### Register (change username before repeating)
+### Register (provide password as a local HTTP-client variable)
 POST http://localhost:8080/api/auth/register
 Content-Type: application/json
 X-CSRF-TOKEN: {{csrf}}
 
-{"username":"portfolio_demo","password":"portfolio123","timezone":"Europe/Istanbul"}
+{"username":"portfolio_demo","password":"{{password}}","timezone":"Europe/Istanbul"}
 
 ### Login
 POST http://localhost:8080/api/auth/login
 Content-Type: application/json
 X-CSRF-TOKEN: {{csrf}}
 
-{"username":"portfolio_demo","password":"portfolio123"}
+{"username":"portfolio_demo","password":"{{password}}"}
+
+### Refresh CSRF after login (login rotates the session ID and token)
+GET http://localhost:8080/api/auth/csrf
+
+> {% client.global.set("csrf", response.body.token); %}
 
 ### Profile
 GET http://localhost:8080/api/auth/me
