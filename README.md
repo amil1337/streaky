@@ -56,7 +56,7 @@ python scripts/smoke.py http://127.0.0.1:8080 --loopback-http
 | `DATABASE_URL` | Managed Heroku Postgres connection variable. When set in production, the app derives PostgreSQL JDBC settings, passes credentials separately and requires TLS. |
 | `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | Required when production uses individual database variables, as on Render. |
 | `DB_PORT` | Production PostgreSQL port. Defaults to `5432`. |
-| `DB_URL`, `DB_USER`, `DB_PASSWORD` | Optional JDBC override and credentials for local development. `DB_URL` is ignored by the production datasource. |
+| `DB_URL`, `DB_USER`, `DB_PASSWORD` | An explicit JDBC URL and separate credentials. Production accepts PostgreSQL only, defaults to requiring TLS, and preserves stronger certificate verification settings. Local development also accepts H2. |
 | `DB_POOL_MAX_SIZE`, `DB_POOL_MIN_IDLE` | Hikari pool limits. Defaults are `5` and `0`. Connection acquisition times out after 10 seconds. Production sets a 5-second driver connect timeout and a 30-second socket timeout. |
 | `COOKIE_SECURE` | Enable secure cookies in local HTTPS development. Production always enables Secure. Session cookies also use HttpOnly and SameSite=Lax. |
 | `ALLOWED_ORIGINS` | Comma-separated exact origins for credentialed API CORS. Leave blank for the bundled same-origin frontend. Cross-site cookies remain subject to browser and SameSite rules. |
@@ -73,8 +73,8 @@ Flyway applies V1 (application tables) and V2 (JDBC sessions) before Hibernate v
 
 ### Heroku
 
-1. Use the existing Heroku app. Verify its attached PostgreSQL database, its `DATABASE_URL` attachment, and Flyway history before releasing. Back up existing PostgreSQL data before the first upgrade.
-2. Open the app's Deploy tab. With GitHub deployment enabled, select `amil1337/davamly` and manually deploy the reviewed branch. The `Procfile` selects the production profile. Heroku supplies `PORT`, Java 21 is selected in `system.properties`, and the application takes database credentials from the managed attachment.
+1. Use the existing Heroku app. Verify its PostgreSQL configuration and Flyway history before releasing. The app can reuse external PostgreSQL configured through `DB_URL`, `DB_USER` and `DB_PASSWORD`, or use a managed `DATABASE_URL` attachment. Back up existing PostgreSQL data before the first upgrade.
+2. Open the app's Deploy tab. With GitHub deployment enabled, select `amil1337/davamly` and manually deploy the reviewed branch. The `Procfile` selects the production profile. Heroku supplies `PORT`, Java 21 is selected in `system.properties`, and the application uses the existing database environment variables.
 3. Check the build and runtime logs for Java 21 and successful Flyway migration or validation. Verify `/api/health` and `/api/ready`. Run `python scripts/smoke.py https://<heroku-app-host>`.
 4. If an application rollback is needed, roll back to the previous healthy Heroku release and recheck the endpoints. V1 and V2 are unchanged. Plan any separate database recovery against the backup.
 

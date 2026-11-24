@@ -24,10 +24,13 @@ public class ProductionDataSource {
     source.addDataSourceProperty("socketTimeout", 30);
 
     String managedUrl = environment.getProperty("DATABASE_URL");
-    if (managedUrl == null || managedUrl.isBlank()) {
-      configureFromFields(source, environment);
-    } else {
+    String jdbcUrl = environment.getProperty("DB_URL");
+    if (managedUrl != null && !managedUrl.isBlank()) {
       configureFromHeroku(source, managedUrl);
+    } else if (jdbcUrl != null && !jdbcUrl.isBlank()) {
+      configureFromJdbc(source, environment, jdbcUrl);
+    } else {
+      configureFromFields(source, environment);
     }
     return source;
   }
@@ -53,6 +56,41 @@ public class ProductionDataSource {
     source.setJdbcUrl("jdbc:postgresql://%s:%d/%s".formatted(host, port, database));
     source.setUsername(user);
     source.setPassword(password);
+  }
+
+  private void configureFromJdbc(HikariDataSource source, Environment environment, String value) {
+    try {
+      if (!value.startsWith("jdbc:postgresql://")) throw new IllegalArgumentException();
+      URI url = URI.create(value.substring("jdbc:".length()));
+      String path = url.getPath();
+      int port = url.getPort() == -1 ? 5432 : url.getPort();
+      if (url.getHost() == null || port < 1 || port > 65535
+          || path == null || !path.matches("/" + DATABASE_NAME)
+          || url.getRawUserInfo() != null || url.getFragment() != null) {
+        throw new IllegalArgumentException();
+      }
+
+      source.setJdbcUrl("jdbc:postgresql://%s:%d%s".formatted(url.getHost(), port, path));
+      if (url.getRawQuery() != null) {
+        for (String option : url.getRawQuery().split("&")) {
+          String[] pair = option.split("=", 2);
+          if (pair.length != 2 || pair[0].isBlank()) throw new IllegalArgumentException();
+          String key = decodeUriCredential(pair[0]);
+          if ("user".equalsIgnoreCase(key) || "password".equalsIgnoreCase(key)) {
+            throw new IllegalArgumentException();
+          }
+          source.addDataSourceProperty(key, decodeUriCredential(pair[1]));
+        }
+      }
+      String sslMode = source.getDataSourceProperties().getProperty("sslmode");
+      if (!"verify-full".equals(sslMode) && !"verify-ca".equals(sslMode)) {
+        source.addDataSourceProperty("sslmode", "require");
+      }
+    } catch (IllegalArgumentException e) {
+      throw new IllegalStateException("Invalid production configuration: DB_URL");
+    }
+    source.setUsername(required(environment, "DB_USER"));
+    source.setPassword(required(environment, "DB_PASSWORD"));
   }
 
   private void configureFromHeroku(HikariDataSource source, String value) {
