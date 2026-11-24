@@ -88,6 +88,8 @@ def smoke(url, loopback_http):
         client.login(credentials)
         signed_in = True
         client.request("GET", "/api/auth/me", 200)
+        profile, _ = client.request("GET", "/api/users/me/statistics", 200)
+        check(profile["totalHabits"] == 0, "A new profile should start without habits")
         client.request("POST", "/api/habits", 403, {"name": "Smoke"}, csrf=False)
 
         habit, _ = client.request("POST", "/api/habits", 201,
@@ -115,7 +117,8 @@ def smoke(url, loopback_http):
         if registered:
             if not signed_in:
                 client.login(credentials)
-            client.request("DELETE", "/api/users/me", 204)
+            client.request("DELETE", "/api/users/me", 204,
+                           {"currentPassword": credentials["password"]})
             client.request("GET", "/api/auth/me", 401)
     print("Smoke passed: health, readiness, CSRF, sessions, CRUD, progress, statistics, logout and account cleanup")
 

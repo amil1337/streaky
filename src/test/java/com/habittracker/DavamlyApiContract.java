@@ -196,6 +196,7 @@ abstract class DavamlyApiContract {
                             "timezone", "UTC"))))
         .andExpect(status().isCreated())
         .andExpect(jsonPath("$.username").value(entered.toLowerCase(Locale.ROOT)))
+        .andExpect(jsonPath("$.usernameLabel").value(entered))
         .andExpect(jsonPath("$.name").value(entered));
 
     mvc.perform(
@@ -332,7 +333,12 @@ abstract class DavamlyApiContract {
 
     Client other = login(users.findById(userId).orElseThrow().getUsername());
     assertEquals(2, jdbc.queryForObject("select count(*) from spring_session where principal_name = ?", Integer.class, userId.toString()));
-    mvc.perform(delete("/api/users/me").cookie(c.session).header("X-CSRF-TOKEN", c.csrf))
+    mvc.perform(delete("/api/users/me").cookie(c.session).header("X-CSRF-TOKEN", c.csrf)
+            .contentType("application/json").content(payload(Map.of("currentPassword", "invalid-example"))))
+        .andExpect(status().isUnauthorized());
+    assertTrue(users.existsById(userId));
+    mvc.perform(delete("/api/users/me").cookie(c.session).header("X-CSRF-TOKEN", c.csrf)
+            .contentType("application/json").content(payload(Map.of("currentPassword", "portfolio123"))))
         .andExpect(status().isNoContent());
 
     assertFalse(users.existsById(userId));
@@ -416,11 +422,51 @@ abstract class DavamlyApiContract {
   }
 
   @Test
+  void redesignedProfileAndHabitPreferencesAreBackedByTheApi() throws Exception {
+    Client c = client("UTC");
+    String first = create(c, "counter", 3);
+    String second = create(c, "completion", 1);
+    mvc.perform(put("/api/habits/" + second).cookie(c.session).header("X-CSRF-TOKEN", c.csrf)
+            .contentType("application/json").content(payload(
+                Map.of("name", "Stretch", "color", "#2f80ed", "defaultHabit", true))))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.color").value("#2F80ED"))
+        .andExpect(jsonPath("$.weeklyGoal").value(7));
+    mvc.perform(get("/api/habits").cookie(c.session))
+        .andExpect(jsonPath("$[0].id").value(second))
+        .andExpect(jsonPath("$[0].defaultHabit").value(true))
+        .andExpect(jsonPath("$[1].id").value(first))
+        .andExpect(jsonPath("$[1].defaultHabit").value(false));
+    mvc.perform(get("/api/users/me/statistics").cookie(c.session))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.totalHabits").value(2));
+
+    String renamed = "Renamed" + UUID.randomUUID().toString().substring(0, 8);
+    mvc.perform(patch("/api/users/me").cookie(c.session).header("X-CSRF-TOKEN", c.csrf)
+            .contentType("application/json").content(payload(Map.of("username", renamed))))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.username").value(renamed.toLowerCase(Locale.ROOT)))
+        .andExpect(jsonPath("$.usernameLabel").value(renamed));
+    Client secondSession = login(renamed.toLowerCase(Locale.ROOT));
+    mvc.perform(put("/api/users/me/password").cookie(c.session).header("X-CSRF-TOKEN", c.csrf)
+            .contentType("application/json").content(payload(
+                Map.of("currentPassword", "portfolio123", "newPassword", "fixture-updated-password"))))
+        .andExpect(status().isNoContent());
+    mvc.perform(get("/api/auth/me").cookie(c.session)).andExpect(status().isUnauthorized());
+    mvc.perform(get("/api/auth/me").cookie(secondSession.session)).andExpect(status().isUnauthorized());
+    assertThrows(org.springframework.web.server.ResponseStatusException.class,
+        () -> auth.login(renamed, "portfolio123"));
+    assertEquals(renamed, auth.login(renamed, "fixture-updated-password").getPublicUsername());
+  }
+
+  @Test
   void packagedFrontendAndHealthArePublic() throws Exception {
     mvc.perform(get("/index.html"))
         .andExpect(status().isOk())
         .andExpect(content().contentTypeCompatibleWith("text/html"))
-        .andExpect(content().string(org.hamcrest.Matchers.containsString("id=\"auth-form\"")));
+        .andExpect(content().string(org.hamcrest.Matchers.containsString("habit tracking made simple")));
+    for (String page : List.of("/", "/login", "/signup", "/app", "/profile", "/activity")) {
+      mvc.perform(get(page)).andExpect(status().isOk()).andExpect(forwardedUrl("/index.html"));
+    }
+    mvc.perform(get("/assets/davamly-logo.png")).andExpect(status().isOk());
     mvc.perform(get("/app.js"))
         .andExpect(status().isOk())
         .andExpect(content().string(org.hamcrest.Matchers.containsString("/api/auth/login")));

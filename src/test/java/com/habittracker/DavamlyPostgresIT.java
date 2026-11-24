@@ -74,7 +74,7 @@ class DavamlyPostgresIT extends DavamlyApiContract {
 
       try {
         assertTrue(written.await(5, TimeUnit.SECONDS));
-        var deletion = threads.submit(() -> accounts.delete(user.getId()));
+        var deletion = threads.submit(() -> accounts.delete(user.getId(), "fixture-only-password"));
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         boolean blocked = false;
         while (!blocked && System.nanoTime() < deadline) {
@@ -103,8 +103,8 @@ class DavamlyPostgresIT extends DavamlyApiContract {
 
   @Test
   void validatesProductionSchemaOnPostgresAndProtectsCookies() throws Exception {
-    assertEquals(2, jdbc.queryForObject(
-        "select count(*) from flyway_schema_history where version in ('1', '2') and success",
+    assertEquals(4, jdbc.queryForObject(
+        "select count(*) from flyway_schema_history where version in ('1', '2', '3', '4') and success",
         Integer.class));
     var version = jdbc.queryForObject("select version()", String.class);
     assertTrue(version.startsWith("PostgreSQL"));

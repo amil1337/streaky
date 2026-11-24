@@ -32,11 +32,28 @@ public class ProfileController {
     return UserResponse.from(auth.updateProfile(SessionUser.id(s), r));
   }
 
+  @PutMapping("/password")
+  @ResponseStatus(HttpStatus.NO_CONTENT)
+  public void changePassword(@Valid @RequestBody PasswordChangeRequest request, HttpSession session) {
+    var userId = SessionUser.id(session);
+    auth.changePassword(userId, request.currentPassword(), request.newPassword());
+    revokeSessions(userId, session);
+  }
+
+  @GetMapping("/statistics")
+  public ProfileStatisticsResponse statistics(HttpSession session) {
+    return accounts.statistics(SessionUser.id(session));
+  }
+
   @DeleteMapping
   @ResponseStatus(HttpStatus.NO_CONTENT)
-  public void delete(HttpSession session) {
+  public void delete(@Valid @RequestBody DeleteAccountRequest request, HttpSession session) {
     var userId = SessionUser.id(session);
-    accounts.delete(userId);
+    accounts.delete(userId, request.currentPassword());
+    revokeSessions(userId, session);
+  }
+
+  private void revokeSessions(java.util.UUID userId, HttpSession session) {
     session.invalidate();
     SecurityContextHolder.clearContext();
     sessions.findByPrincipalName(userId.toString()).keySet().forEach(sessions::deleteById);

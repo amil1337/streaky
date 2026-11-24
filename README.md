@@ -67,7 +67,7 @@ Keep `.env`, database files and secret values out of Git and build contexts. Use
 
 ## Migrations and operations
 
-Flyway applies V1 (application tables) and V2 (JDBC sessions) before Hibernate validates the mapped schema. Add schema changes as new versioned migrations. Leave applied SQL files intact. Automatic baseline is disabled in production. For an existing schema without Flyway history, compare it with V1 and agree on an explicit baseline after a backup.
+Flyway applies V1 (application tables), V2 (JDBC sessions), V3 (habit color and default preference), and V4 (username label and daily tracking) before Hibernate validates the mapped schema. Add schema changes as new versioned migrations. Leave applied SQL files intact. Automatic baseline is disabled in production. For an existing schema without Flyway history, compare it with V1 and agree on an explicit baseline after a backup.
 
 `GET /api/health` checks that the HTTP application is alive. `GET /api/ready` checks a live database query and returns `503` when the database is unavailable. Account deletion removes the account's habits, progress, activity and sessions. Individual habit deletion removes its progress and preserves activity snapshots.
 
@@ -76,7 +76,7 @@ Flyway applies V1 (application tables) and V2 (JDBC sessions) before Hibernate v
 1. Use the existing Heroku app. Verify its PostgreSQL configuration and Flyway history before releasing. The app can reuse external PostgreSQL configured through `DB_URL`, `DB_USER` and `DB_PASSWORD`, or use a managed `DATABASE_URL` attachment. Back up existing PostgreSQL data before the first upgrade.
 2. Open the app's Deploy tab. With GitHub deployment enabled, select `amil1337/davamly` and manually deploy the reviewed branch. The `Procfile` selects the production profile. Heroku supplies `PORT`, Java 21 is selected in `system.properties`, and the application uses the existing database environment variables.
 3. Check the build and runtime logs for Java 21 and successful Flyway migration or validation. Verify `/api/health` and `/api/ready`. Run `python scripts/smoke.py https://<heroku-app-host>`.
-4. If an application rollback is needed, roll back to the previous healthy Heroku release and recheck the endpoints. V1 and V2 are unchanged. Plan any separate database recovery against the backup.
+4. If an application rollback is needed, roll back to the previous healthy Heroku release and recheck the endpoints. V3 and V4 only add columns and an index. Application rollback leaves those additions in place. Plan any separate database recovery against the backup.
 
 [Heroku GitHub deploys](https://devcenter.heroku.com/articles/github-integration) · [Heroku PostgreSQL connection guide](https://devcenter.heroku.com/articles/connecting-heroku-postgres)
 
@@ -87,7 +87,7 @@ Flyway applies V1 (application tables) and V2 (JDBC sessions) before Hibernate v
 3. Check the service Events and Logs for successful startup and Flyway migration messages. Check `/api/health` and `/api/ready` over HTTPS.
 4. Run `python scripts/smoke.py https://<render-service-host>`. The script registers a unique account and removes it at the end.
 
-After the PR is merged, change the Blueprint and service to track `main` in Render. For an application rollback, select the last healthy deployment from the service's Events page and confirm health and readiness. V1 and V2 are unchanged so this release needs no schema rollback. Restore from a verified backup only if recovery requires it.
+After the PR is merged, change the Blueprint and service to track `main` in Render. For an application rollback, select the last healthy deployment from the service's Events page and confirm health and readiness. V3 and V4 are additive and can remain in place when rolling back the application. Restore from a verified backup only if recovery requires it.
 
 [Blueprint reference](https://render.com/docs/blueprint-spec) · [Compute plans](https://render.com/docs/compute-plans) · [Deploys and rollbacks](https://render.com/docs/deploys)
 
@@ -100,10 +100,12 @@ Use a cookie jar. Fetch `/api/auth/csrf` before writes and send its token in the
 | `GET /api/auth/csrf` | Returns `{ "token": "…", "headerName": "X-CSRF-TOKEN" }` and initializes a session. |
 | `POST /api/auth/register` | `{ "username": "example", "password": "<local test password>", "timezone": "Europe/Istanbul" }` → `201` with the user. Duplicate usernames return `409`. |
 | `POST /api/auth/login` | Username and password → `200` with the user. Invalid credentials return `401`. |
-| `GET /api/auth/me` | Returns `{ id, username, name, bio, timezone }`. |
+| `GET /api/auth/me` | Returns `{ id, username, usernameLabel, name, bio, timezone }`. The display label preserves username casing. |
 | `POST /api/auth/logout` | Invalidates the current session → `204`. |
 | `PATCH /api/users/me` | `{ "name": "Example", "bio": "", "timezone": "UTC" }` → updated user. |
-| `DELETE /api/users/me` | Deletes the current user's account and revokes sessions → `204`. |
+| `GET /api/users/me/statistics` | Returns habit counts, completion totals and streaks for the current user. |
+| `PUT /api/users/me/password` | Requires the current and new passwords, then revokes all sessions → `204`. |
+| `DELETE /api/users/me` | Requires the current password, then deletes the account and revokes sessions → `204`. |
 | `GET /api/habits` | Returns the user's habits and today's counts in the profile timezone. |
 | `POST /api/habits` | `{ "name": "Drink water", "kind": "counter", "target": 5, "unit": "glasses" }` → `201` with the habit. `kind` can be `counter` or `completion`. |
 | `PUT /api/habits/{id}` | Updates the habit and returns `{ id, name, description, kind, target, unit, todayCount, percentage, completed }`. |

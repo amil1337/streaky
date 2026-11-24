@@ -1,1001 +1,1172 @@
-/* davamly frontend */
-(() => {
-  'use strict';
-  const $ = (id) => document.getElementById(id);
-  const UI_KEY = 'davamly.ui.v1';
-  const LEGACY_UI_KEY = 'streaky.ui.v1';
-  const palettes = [
-    {
-      name: 'Cloud',
-      a: '#c6b5ed',
-      b: '#b6ddd3',
-      c: '#edd4bf',
-      accent: '#70609b',
-    },
-    {
-      name: 'Tide',
-      a: '#a9cdeb',
-      b: '#bce4dd',
-      c: '#d7d5f0',
-      accent: '#397d91',
-    },
-    {
-      name: 'Dune',
-      a: '#efd1a9',
-      b: '#e4bbbc',
-      c: '#ded6bd',
-      accent: '#a5704d',
-    },
-    {
-      name: 'Meadow',
-      a: '#bdd4b3',
-      b: '#d4e7ca',
-      c: '#e9dfad',
-      accent: '#577b54',
-    },
+const app = document.getElementById("app");
+const toastRoot = document.getElementById("toast-root");
+
+const state = {
+  csrf: null,
+  user: null,
+  habits: [],
+  heatmaps: new Map(),
+  statistics: new Map(),
+  heatmapDays: Number(localStorage.getItem("davamly-heatmap-days")) || 84,
+  activityPage: 0,
+};
+
+let cleanupLanding = () => {};
+let activeHeatmapDay = null;
+const PROTECTED_ROUTES = new Set(["/app", "/activity", "/profile"]);
+
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function escapeHtml(value) {
+  const entities = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" };
+  return String(value ?? "").replace(/[&<>"']/g, (character) => entities[character]);
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function formatDate(value, options) {
+  if (!value) return "";
+  return new Intl.DateTimeFormat(
+    "en",
+    options || { month: "short", day: "numeric", year: "numeric" },
+  ).format(new Date(value + (value.length === 10 ? "T12:00:00" : "")));
+}
+
+function relativeTime(value) {
+  const date = new Date(value);
+  const seconds = Math.round((date.getTime() - Date.now()) / 1000);
+  const formatter = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+  const ranges = [
+    ["year", 31536000],
+    ["month", 2592000],
+    ["week", 604800],
+    ["day", 86400],
+    ["hour", 3600],
+    ["minute", 60],
   ];
-  const themeKeys = ['a', 'b', 'c', 'accent'];
-  const validTheme = (t) =>
-    t && themeKeys.every((k) => typeof t[k] === 'string' && /^#[0-9a-f]{6}$/i.test(t[k]));
-  let ui = { theme: { ...palettes[0] }, views: {} };
-  try {
-    const current = localStorage.getItem(UI_KEY);
-    const legacy = current === null ? localStorage.getItem(LEGACY_UI_KEY) : null;
-    const saved = JSON.parse(current ?? legacy);
-    if (saved && validTheme(saved.theme)) ui.theme = saved.theme;
-    if (saved?.views && typeof saved.views === 'object') ui.views = saved.views;
-    if (legacy !== null && saved && typeof saved === 'object') {
-      localStorage.setItem(UI_KEY, JSON.stringify(ui));
-    }
-  } catch {}
-
-  const state = {
-    loading: true,
-    profile: null,
-    habits: [],
-    maps: new Map(),
-    stats: new Map(),
-    activity: [],
-    activityLoaded: false,
-    activityPage: -1,
-    activityHasNext: false,
-    activityLoading: false,
-    activityError: '',
-  };
-  let csrfInfo = null,
-    editorMode = '',
-    editingId = null,
-    mapObserver,
-    authMode = 'login';
-  const el = (tag, text, cls) => {
-    const n = document.createElement(tag);
-    if (text !== undefined) n.textContent = text;
-    if (cls) n.className = cls;
-    return n;
-  };
-  const icon = (name) => {
-    const n = el('i', undefined, `fa-solid fa-${name}`);
-    n.setAttribute('aria-hidden', 'true');
-    return n;
-  };
-  function button(label, iconName, action, className = '') {
-    const node = el('button', undefined, `btn ${className}`.trim());
-    node.type = 'button';
-    if (iconName) node.append(icon(iconName));
-    if (label) node.append(el('span', label));
-    if (action) node.onclick = action;
-    return node;
+  for (const [unit, size] of ranges) {
+    if (Math.abs(seconds) >= size) return formatter.format(Math.round(seconds / size), unit);
   }
-  const persistUi = () => {
+  return formatter.format(seconds, "second");
+}
+
+function showToast(message, type) {
+  const toast = document.createElement("div");
+  toast.className = "toast" + (type === "error" ? " error" : "");
+  toast.textContent = message;
+  toastRoot.appendChild(toast);
+  window.setTimeout(() => toast.remove(), 4200);
+}
+
+async function ensureCsrf(force) {
+  if (state.csrf && !force) return state.csrf;
+  const response = await fetch("/api/auth/csrf", {
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  if (!response.ok) throw new ApiError("Could not initialize a secure session.", response.status);
+  state.csrf = await response.json();
+  return state.csrf;
+}
+
+async function api(path, options) {
+  const settings = options || {};
+  const method = (settings.method || "GET").toUpperCase();
+  const headers = new Headers(settings.headers || {});
+  let body = settings.body;
+
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    const token = await ensureCsrf(false);
+    headers.set(token.headerName || "X-CSRF-TOKEN", token.token);
+  }
+  if (body !== undefined && body !== null && !(body instanceof FormData) && typeof body !== "string") {
+    headers.set("Content-Type", "application/json");
+    body = JSON.stringify(body);
+  }
+
+  const response = await fetch(path, {
+    method,
+    headers,
+    body,
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+
+  if (response.status === 401 && !settings.allow401) {
+    state.user = null;
+  }
+  if (!response.ok) {
+    let message = "Something went wrong. Please try again.";
     try {
-      localStorage.setItem(UI_KEY, JSON.stringify(ui));
-    } catch {}
-  };
-  const pad = (n) => String(n).padStart(2, '0');
-  function today() {
-    const zone =
-      state.profile?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    try {
-      const parts = Object.fromEntries(
-        new Intl.DateTimeFormat('en-US', {
-          timeZone: zone,
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit',
-        })
-          .formatToParts(new Date())
-          .filter((p) => p.type !== 'literal')
-          .map((p) => [p.type, p.value]),
-      );
-      return `${parts.year}-${parts.month}-${parts.day}`;
+      const payload = await response.json();
+      message = payload.detail || payload.message || message;
     } catch {
-      const d = new Date();
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      if (response.status === 401) message = "Your session has ended. Please sign in again.";
     }
+    throw new ApiError(message, response.status);
   }
-  const parse = (s) => new Date(`${s}T12:00:00Z`);
-  const key = (d) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
-  const shift = (s, n) => {
-    const d = parse(s);
-    d.setUTCDate(d.getUTCDate() + n);
-    return key(d);
+  if (response.status === 204) return null;
+  const contentType = response.headers.get("content-type") || "";
+  return contentType.includes("application/json") ? response.json() : response.text();
+}
+
+function navigate(path, replace) {
+  if (window.location.pathname !== path) {
+    window.history[replace ? "replaceState" : "pushState"]({}, "", path);
+  }
+  window.scrollTo({ top: 0, behavior: "auto" });
+  renderRoute();
+}
+
+function logoMarkup() {
+  return [
+    '<span class="brand-mark" aria-hidden="true">',
+    '<img src="/assets/davamly-logo.png" alt="" />',
+    "</span>",
+  ].join("");
+}
+
+function iconMarkup(name) {
+  const icons = {
+    check: '<circle cx="12" cy="12" r="9"></circle><path d="m8 12 2.6 2.6L16.5 9"></path>',
+    calendar: '<rect x="3" y="5" width="18" height="16" rx="2"></rect><path d="M16 3v4M8 3v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"></path>',
+    settings: '<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21H9.6v-.09A1.7 1.7 0 0 0 8.5 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3V9.6h.09A1.7 1.7 0 0 0 4.6 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.5 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.13.37.34.7.6 1 .3.28.68.42 1.1.4H21v4h-.09A1.7 1.7 0 0 0 19.4 15Z"></path>',
+    eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"></path><circle cx="12" cy="12" r="3"></circle>',
+    eyeOff: '<path d="m3 3 18 18"></path><path d="M10.6 5.2A11.8 11.8 0 0 1 12 5c6.5 0 10 7 10 7a18.8 18.8 0 0 1-3 4.1M6.2 6.2C3.5 8.1 2 12 2 12s3.5 7 10 7a10.8 10.8 0 0 0 5.8-1.8M9.9 9.9a3 3 0 0 0 4.2 4.2"></path>',
+    close: '<path d="M6 6l12 12M18 6 6 18"></path>',
   };
-  const validDate = (s) =>
-    typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && key(parse(s)) === s;
-  const format = (s) =>
-    parse(s).toLocaleDateString('en-US', {
-      timeZone: 'UTC',
-      day: 'numeric',
-      month: 'short',
-      year: 'numeric',
-    });
-  function datesBetween(start, end, limit = 366) {
-    const result = [];
-    for (let d = start; d <= end && result.length <= limit; d = shift(d, 1)) result.push(d);
-    return result;
-  }
-  const isCounter = (h) => h.kind === 'counter';
+  return '<svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true">' + icons[name] + "</svg>";
+}
 
-  async function csrf(force = false) {
-    if (csrfInfo && !force) return csrfInfo;
-    const response = await fetch('/api/auth/csrf', {
-      credentials: 'same-origin',
-      headers: { Accept: 'application/json' },
-    });
-    if (!response.ok) throw new Error('Could not initialize a secure session.');
-    csrfInfo = await response.json();
-    return csrfInfo;
+function landingHeader() {
+  return [
+    '<header class="nav-wrap"><nav class="nav-shell" aria-label="Main navigation">',
+    '<a href="/" class="brand-link" data-route="/" aria-label="davamly home">', logoMarkup(), "</a>",
+    '<div class="nav-links" id="navigation-links">',
+    '<a class="nav-link" href="#features">Features</a>',
+    '<a class="nav-link" href="#how-it-works">How it works</a>',
+    '<a class="nav-link" href="#faq">FAQ</a>',
+    "</div>",
+    '<div class="nav-actions">',
+    '<a class="nav-link" href="/login" data-route="/login">Sign in</a>',
+    '<a class="btn btn-primary" href="/signup" data-route="/signup">Get started</a>',
+    mobileMenuMarkup(),
+    "</div></nav></header>",
+  ].join("");
+}
+
+function appHeader(active) {
+  const navItem = (path, label) =>
+    '<a class="nav-link' + (active === path ? " active" : "") + '" href="' + path +
+    '" data-route="' + path + '">' + label + "</a>";
+  return [
+    '<header class="nav-wrap"><nav class="nav-shell app-nav" aria-label="App navigation">',
+    '<a href="/app" data-route="/app" aria-label="Dashboard">', logoMarkup(), "</a>",
+    '<div class="nav-links" id="navigation-links">', navItem("/app", "Home"), navItem("/activity", "Activity"), "</div>",
+    '<div class="nav-actions">',
+    '<button class="nav-link" type="button" data-logout>Log out</button>',
+    '<a class="btn btn-primary" href="/profile" data-route="/profile">Profile</a>',
+    mobileMenuMarkup(),
+    "</div></nav></header>",
+  ].join("");
+}
+
+function mobileMenuMarkup() {
+  return '<button class="icon-btn mobile-menu-button" type="button" data-mobile-menu aria-label="Open navigation" aria-expanded="false" aria-controls="navigation-links">☰</button>';
+}
+
+function closeMobileMenu() {
+  const shell = document.querySelector(".nav-shell.menu-open");
+  if (!shell) return;
+  shell.classList.remove("menu-open");
+  const button = shell.querySelector("[data-mobile-menu]");
+  button.textContent = "☰";
+  button.setAttribute("aria-expanded", "false");
+  button.setAttribute("aria-label", "Open navigation");
+}
+
+function demoHeatmapData(today = new Date()) {
+  const filled = new Set([2, 5, 8, 11, 15, 18, 22, 25, 29, 32, 35, 38, 42, 45, 48,
+    52, 53, 54, 55, 56, 57, 58, 63, 67, 71, 74, 78, 80, 81, 82]);
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 83, 12);
+  const days = [];
+  for (let index = 0; index < 84; index += 1) {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+    const count = filled.has(index) ? 1 : 0;
+    const dateKey = [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"),
+      String(date.getDate()).padStart(2, "0")].join("-");
+    days.push({ date: dateKey, count, percentage: count * 100 });
   }
-  async function api(path, options = {}, retry = true) {
-    const method = (options.method || 'GET').toUpperCase(),
-      headers = { Accept: 'application/json', ...(options.headers || {}) };
-    if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-      const token = await csrf();
-      headers[token.headerName] = token.token;
-    }
-    const response = await fetch(path, {
-      ...options,
-      method,
-      headers,
-      credentials: 'same-origin',
+  return days;
+}
+
+function demoStatistics(days) {
+  let longestStreak = 0, run = 0, completedDays = 0;
+  for (const day of days) {
+    const completed = day.count >= 1;
+    if (completed) completedDays += 1;
+    run = completed ? run + 1 : 0;
+    longestStreak = Math.max(longestStreak, run);
+  }
+  // An unfinished today does not break the streak carried over from yesterday.
+  let index = days.length - 1;
+  if (index >= 0 && days[index].count === 0) index -= 1;
+  let currentStreak = 0;
+  while (index >= 0 && days[index--].count >= 1) currentStreak += 1;
+  return { longestStreak, currentStreak, completedDays };
+}
+
+function demoHeatmapMarkup(days = demoHeatmapData()) {
+  const today = days[days.length - 1];
+  return habitCardMarkup(
+    { id: "demo", name: "Fitness", kind: "completion", target: 1,
+      weeklyGoal: 7, completed: today.count >= 1 },
+    { demo: true, heatmap: days, today: new Date(today.date + "T12:00:00"),
+      statistics: demoStatistics(days) },
+  );
+}
+
+function renderLanding() {
+  const demoDays = demoHeatmapData();
+  document.title = "davamly — habit tracking made simple";
+  app.innerHTML = [
+    landingHeader(),
+    '<main id="main-content" class="landing-main">',
+    '<section class="hero">',
+    '<div class="container hero-copy">',
+    "<h1>Habit Tracking<br />Made Simple.</h1>",
+    "<p>Create habits and track your daily progress with a simple, distraction-free app.<br />See how far you’ve come, all in one place. No unnecessary features. Just you,<br />your habits, and your progress.</p>",
+    '<div class="hero-actions">',
+    '<a class="btn btn-primary" href="/signup" data-route="/signup">Get started</a>',
+    '<a class="btn btn-secondary" href="#how-it-works">See how it works</a>',
+    "</div></div>",
+    '<div class="hero-heatmap-stage" data-hero-heatmap>',
+    demoHeatmapMarkup(demoDays),
+    "</div></section>",
+    '<section id="features" class="section"><div class="container">',
+    '<div class="section-heading">',
+    "<h2>Different habits.<br /><span class=\"accent\">Different ways to track.</span></h2></div>",
+    '<div class="feature-grid">',
+    featureCard("/assets/daily-completion.png", "Complete a habit once per day. Just click completed if you did."),
+    featureCard("/assets/quantity-goal.png", "Set a daily quantity goal and update your progress throughout the day."),
+    featureCard("/assets/time-goal.png", "Set a time-based goal and log your minutes manually or with a timer."),
+    "</div></div></section>",
+    '<section id="how-it-works" class="section steps-section"><div class="container">',
+    '<div class="section-heading center">',
+    '<h2>A few simple steps<br /><span class="accent">to get started.</span></h2></div>',
+    '<div class="steps-grid">',
+    stepCard("Create account", 'Go to <a class="text-link" href="/signup" data-route="/signup">login page</a> and pick yourself a username and a password. No email required.'),
+    stepCard("First habit", "From dashboard, create a new habit and choose how to track it."),
+    stepCard("Start tracking", "Log your activity and watch your progress over time."),
+    "</div></div></section>",
+    '<section id="faq" class="section"><div class="container faq-layout">',
+    '<div class="faq-list">',
+    faqItem(0, "Is davamly free to use?", "Yes. You can create an account and track your habits without a paid plan.", false),
+    faqItem(1, "Do I need an email address to sign up?", "No. A unique username and a secure password are enough.", false),
+    faqItem(2, "Can I view my past activity?", "Yes. Every habit includes a heatmap, streaks and a recent activity timeline.", false),
+    faqItem(3, "What types of habits can I track?", "Use simple daily completion or a quantity goal such as glasses, pages or minutes.", false),
+    faqItem(4, "Can I set my own goals for each habit?", "Yes. Quantity habits can have their own daily target and unit.", false),
+    "</div>",
+    '<aside class="faq-aside"><h2>Frequently<br /><span class="accent">Asked Questions</span></h2></aside>',
+    "</div></section></main>",
+  ].join("");
+
+  bindLandingInteractions(demoDays);
+}
+
+function featureCard(image, copy) {
+  return [
+    '<article class="feature-card"><div class="feature-visual">',
+    '<img src="', image, '" alt="" loading="lazy" /></div>',
+    '<div class="feature-copy"><p>', copy, "</p></div></article>",
+  ].join("");
+}
+
+function stepCard(title, copy) {
+  return '<article class="step-card"><h3>' + title + "</h3><p>" + copy + "</p></article>";
+}
+
+function faqItem(index, question, answer, open) {
+  return [
+    '<article class="faq-item', open ? " open" : "", '" data-faq-item>',
+    '<button class="faq-question" type="button" aria-expanded="', open ? "true" : "false",
+    '" aria-controls="faq-answer-', index, '">',
+    "<span>Q: ", question, '</span><span class="faq-toggle" aria-hidden="true">',
+    open ? "−" : "+", "</span></button>",
+    '<div class="faq-answer" id="faq-answer-', index, '"><div><p>A: ', answer,
+    "</p></div></div></article>",
+  ].join("");
+}
+
+function bindLandingInteractions(demoDays) {
+  document.querySelectorAll("[data-faq-item] .faq-question").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = button.closest("[data-faq-item]");
+      const shouldOpen = !item.classList.contains("open");
+      document.querySelectorAll("[data-faq-item]").forEach((candidate) => {
+        candidate.classList.remove("open");
+        candidate.querySelector(".faq-question").setAttribute("aria-expanded", "false");
+        candidate.querySelector(".faq-toggle").textContent = "+";
+      });
+      if (shouldOpen) {
+        item.classList.add("open");
+        button.setAttribute("aria-expanded", "true");
+        item.querySelector(".faq-toggle").textContent = "−";
+      }
     });
-    if (response.status === 403 && retry && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-      await csrf(true);
-      return api(path, options, false);
+  });
+
+  const stage = document.querySelector("[data-hero-heatmap]");
+  if (!stage) return;
+  let frame = 0;
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const updateCurve = () => {
+    frame = 0;
+    const rect = stage.getBoundingClientRect();
+    const start = window.innerHeight * 0.94;
+    const end = window.innerHeight * 0.24;
+    const progress = clamp((start - rect.top) / (start - end), 0, 1);
+    stage.style.setProperty("--landing-progress", String(reducedMotion.matches ? 1 : progress));
+  };
+  const scheduleCurve = () => {
+    if (!frame) frame = window.requestAnimationFrame(updateCurve);
+  };
+  updateCurve();
+  window.addEventListener("scroll", scheduleCurve, { passive: true });
+  window.addEventListener("resize", scheduleCurve);
+  cleanupLanding = () => {
+    window.removeEventListener("scroll", scheduleCurve);
+    window.removeEventListener("resize", scheduleCurve);
+    window.cancelAnimationFrame(frame);
+  };
+
+  stage.addEventListener("click", (event) => {
+    if (!event.target.closest("[data-demo-complete]")) return;
+    const today = demoDays[demoDays.length - 1];
+    today.count = today.count ? 0 : 1;
+    today.percentage = today.count * 100;
+    stage.innerHTML = demoHeatmapMarkup(demoDays);
+    stage.querySelector("[data-demo-complete]").focus({ preventScroll: true });
+  });
+}
+
+function renderAuth(mode) {
+  const signup = mode === "signup";
+  document.title = (signup ? "Sign up" : "Log in") + " — davamly";
+  app.innerHTML = [
+    '<main id="main-content" class="auth-page">',
+    '<section class="auth-card"><div class="auth-form-wrap">',
+    "<h1>", signup ? "Sign Up" : "Log In", "</h1>",
+    '<form id="auth-form" class="form-grid" novalidate>',
+    fieldMarkup("auth-username", "Username", "text", "Username:", "username", "3", "40"),
+    passwordFieldMarkup("auth-password", "Password", "Password:", signup ? "new-password" : "current-password"),
+    signup ? passwordFieldMarkup("auth-confirm", "Confirm password", "Confirm Password:", "new-password") : "",
+    '<p id="auth-error" class="form-error" role="alert"></p>',
+    '<button class="btn btn-primary" type="submit">', signup ? "Create account" : "Log in", "</button>",
+    "</form></div>",
+    '<div class="auth-switch-strip">', signup ? "Already have an account? " : "Don’t have an account? ",
+    '<a class="text-link" href="', signup ? "/login" : "/signup", '" data-route="',
+    signup ? "/login" : "/signup", '">', signup ? "Log in" : "Sign up", "</a></div>",
+    "</section></main>",
+  ].join("");
+  bindAuth(mode);
+}
+
+function fieldMarkup(id, label, type, placeholder, autocomplete, min, max) {
+  return [
+    '<div class="field"><label for="', id, '">', label, "</label>",
+    '<input id="', id, '" name="', id, '" type="', type, '" placeholder="', placeholder,
+    '" autocomplete="', autocomplete, '" required',
+    min ? ' minlength="' + min + '"' : "",
+    max ? ' maxlength="' + max + '"' : "",
+    " /></div>",
+  ].join("");
+}
+
+function passwordFieldMarkup(id, label, placeholder, autocomplete) {
+  return [
+    '<div class="field"><label for="', id, '">', label, "</label>",
+    '<div class="password-field"><input id="', id, '" name="', id,
+    '" type="password" placeholder="', placeholder, '" autocomplete="', autocomplete,
+    '" minlength="8" maxlength="72" required />',
+    '<button class="password-toggle" type="button" data-password-toggle="', id,
+    '" aria-label="Show password" aria-pressed="false">', iconMarkup("eye"), "</button></div></div>",
+  ].join("");
+}
+
+function bindPasswordToggles() {
+  document.querySelectorAll("[data-password-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const input = document.getElementById(button.dataset.passwordToggle);
+      const willShow = input.type === "password";
+      input.type = willShow ? "text" : "password";
+      button.innerHTML = iconMarkup(willShow ? "eyeOff" : "eye");
+      button.setAttribute("aria-label", willShow ? "Hide password" : "Show password");
+      button.setAttribute("aria-pressed", String(willShow));
+    });
+  });
+}
+
+function bindAuth(mode) {
+  bindPasswordToggles();
+
+  const form = document.getElementById("auth-form");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const error = document.getElementById("auth-error");
+    const submit = form.querySelector('button[type="submit"]');
+    const username = document.getElementById("auth-username").value.trim();
+    const password = document.getElementById("auth-password").value;
+    const confirm = document.getElementById("auth-confirm");
+    error.textContent = "";
+    if (!form.reportValidity()) return;
+    if (confirm && password !== confirm.value) {
+      error.textContent = "Passwords do not match.";
+      return;
     }
-    const contentType = response.headers.get('content-type') || '';
-    const data =
-      response.status === 204
-        ? null
-        : contentType.includes('json')
-          ? await response.json()
-          : await response.text();
-    if (!response.ok) {
-      const error = new Error(
-        data?.detail || data?.message || data?.error || `Request failed (${response.status}).`,
+
+    submit.disabled = true;
+    try {
+      if (mode === "signup") {
+        await api("/api/auth/register", {
+          method: "POST",
+          body: {
+            username,
+            password,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+          },
+        });
+      }
+      state.user = await api("/api/auth/login", {
+        method: "POST",
+        body: { username, password },
+      });
+      await ensureCsrf(true);
+      navigate("/app", true);
+    } catch (failure) {
+      error.textContent = failure.message;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+}
+
+async function renderDashboard(preserveContent = false) {
+  document.title = "Home — davamly";
+  if (!preserveContent || !document.querySelector("[data-habit-list]")) app.innerHTML = [
+    appHeader("/app"),
+    '<main id="main-content" class="app-main"><div class="app-page">',
+    '<div class="loading-view" style="min-height: 50vh"><span class="loading-mark"></span></div>',
+    "</div></main>",
+  ].join("");
+  try {
+    state.habits = await api("/api/habits");
+    await Promise.all(
+      state.habits.map(async (habit) => {
+        const [heatmap, statistics] = await Promise.all([
+          api("/api/habits/" + habit.id + "/heatmap?days=" + state.heatmapDays),
+          api("/api/habits/" + habit.id + "/statistics?days=366"),
+        ]);
+        state.heatmaps.set(habit.id, heatmap);
+        state.statistics.set(habit.id, statistics);
+      }),
+    );
+    drawDashboard();
+  } catch (failure) {
+    if (preserveContent && failure.status !== 401) {
+      showToast(failure.message, "error");
+      return;
+    }
+    handlePageFailure(failure);
+  }
+}
+
+function drawDashboard() {
+  const page = document.querySelector(".app-page");
+  if (!state.habits.length) {
+    page.innerHTML = [
+      '<section class="empty-state"><div>',
+      '<h1>Hey there! <span class="ios-wave" aria-label="waving hand"></span></h1>',
+      "<p>Create your first habit and track your progress. The only rule is to be consistent. Don’t forget to complete your habits every day.</p>",
+      '<button class="add-habit-orb" type="button" data-add-habit aria-label="Create your first habit">+</button>',
+      '<span class="add-habit-label">Add new habit</span>',
+      "</div></section>",
+    ].join("");
+    page.querySelector("[data-add-habit]").addEventListener("click", () => openHabitDialog(null));
+    return;
+  }
+
+  page.innerHTML = [
+    '<div class="habit-list" data-habit-list>',
+    state.habits.map((habit) => habitCardMarkup(habit)).join(""),
+    "</div>",
+    '<button class="add-habit-orb add-habit-bottom" type="button" data-add-habit aria-label="Create a habit">+</button>',
+    '<span class="add-habit-label">Add new habit</span>',
+  ].join("");
+  bindDashboard();
+}
+
+function habitCardMarkup(habit, options = {}) {
+  const demo = options.demo === true;
+  const heatmap = options.heatmap || state.heatmaps.get(habit.id) || [];
+  const statistics = options.statistics || state.statistics.get(habit.id) || {
+    currentStreak: 0,
+    longestStreak: 0,
+    completedDays: 0,
+  };
+  const start = heatmap.length ? formatDate(heatmap[0].date, { month: "short", day: "numeric" }) : "";
+  const end = heatmap.length ? formatDate(heatmap[heatmap.length - 1].date, { month: "short", day: "numeric", year: "numeric" }) : "";
+  const now = options.today || new Date();
+  const currentIsoDay = now.getDay() === 0 ? 7 : now.getDay();
+  const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - currentIsoDay + 1);
+  const weeklyGoal = 7;
+  const weeklyDone = heatmap.filter((day) => {
+    const date = new Date(day.date + "T12:00:00");
+    return date >= weekStart && day.count >= habit.target;
+  }).length;
+  const quantity = habit.kind === "counter";
+  const progressCount = quantity ? (habit.todayCount || 0) : weeklyDone;
+  const progressTarget = quantity ? habit.target : weeklyGoal;
+  const percentage = Math.min(100, Math.round((progressCount / progressTarget) * 100));
+  const completionAction = habit.completed ? "Undo today" : "Complete today";
+  return [
+    '<article class="habit-card', demo ? " demo-habit-card" : "", '" ',
+    demo ? 'data-demo-card' : 'data-habit-id="' + escapeHtml(habit.id) + '"',
+    ' style="--habit-color:#FF3434;--progress:', percentage, '">',
+    '<div class="reference-habit-main"><div class="habit-title-row"><div><h2>', escapeHtml(habit.name), "</h2><p>",
+    start, " – ", end, "</p></div></div>",
+    heatmapCalendarMarkup(heatmap, habit),
+    '<div class="habit-stat-row">',
+    habitStat(statistics.longestStreak, "Longest streak"),
+    habitStat(statistics.currentStreak, "Current streak"),
+    habitStat(statistics.completedDays, "Total completed"),
+    "</div></div>",
+    '<div class="reference-progress-panel"><h3>', quantity ? "Today's progress" : "Weekly progress", '</h3>',
+    '<div class="reference-count"><span', demo ? ' data-demo-count' : '', '>', progressCount, "/", progressTarget,
+    '</span> <small>', quantity ? escapeHtml(habit.unit || "times") : "days", "</small></div>",
+    '<div class="progress-track"><div class="progress-fill"></div></div>',
+    '<p class="progress-caption"', demo ? ' data-demo-caption' : '', '>', percentage,
+    quantity ? "% of your daily goal</p>" : "% of your weekly goal</p>",
+    '<div class="reference-actions">',
+    habit.kind === "completion"
+      ? '<button class="btn btn-secondary" type="button" ' +
+        (demo ? 'data-demo-complete aria-pressed="' + habit.completed + '"' : 'data-completion="' + (!habit.completed) + '"') + ">" +
+        completionAction + " " + iconMarkup("check") + "</button>"
+      : '<div class="counter-actions"><button class="btn btn-secondary" type="button" data-decrement aria-label="Decrease progress">−</button>' +
+        '<button class="btn btn-secondary" type="button" data-increment aria-label="Increase progress">+</button></div>',
+    '<button class="btn btn-secondary" type="button" ', demo ? 'data-route="/signup"' : 'data-date-range', '>Date range ', iconMarkup("calendar"), "</button>",
+    '<button class="btn btn-secondary" type="button" ', demo ? 'data-route="/signup"' : 'data-habit-settings', '>Habit settings ', iconMarkup("settings"), "</button>",
+    "</div></div></article>",
+  ].join("");
+}
+
+function heatmapCalendarMarkup(days, habit) {
+  if (!days.length) return '<div class="reference-calendar empty"></div>';
+  const firstDate = new Date(days[0].date + "T12:00:00");
+  const firstOffset = (firstDate.getDay() + 6) % 7;
+  const weekCount = Math.ceil((firstOffset + days.length) / 7);
+  const monthLabels = new Map();
+  const seenMonths = new Set();
+  const cells = days.map((day, index) => {
+    const date = new Date(day.date + "T12:00:00");
+    const position = firstOffset + index;
+    const column = Math.floor(position / 7) + 1;
+    const row = (position % 7) + 1;
+    const monthKey = date.getFullYear() + "-" + date.getMonth();
+    if (!seenMonths.has(monthKey) && (index === 0 || date.getDate() <= 7)) {
+      seenMonths.add(monthKey);
+      const label = new Intl.DateTimeFormat("en", { month: "short" }).format(date);
+      monthLabels.set(column, monthLabels.has(column) ? monthLabels.get(column) + " / " + label : label);
+    }
+    return heatmapDayMarkup(day, habit, column, row);
+  }).join("");
+  return [
+    '<div class="reference-calendar" style="--week-count:', weekCount, '">',
+    '<div class="reference-months" aria-hidden="true">',
+    [...monthLabels].map(([column, label]) => '<span style="grid-column:' + column +
+      ';grid-row:1" title="' + label + '">' + label + '</span>').join(""), "</div>",
+    '<div class="reference-calendar-body"><div class="reference-weekdays" aria-hidden="true">',
+    '<span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span>',
+    '</div><div class="heatmap" aria-label="Habit heatmap">', cells, "</div></div></div>",
+  ].join("");
+}
+
+function heatmapDayMarkup(day, habit, column, row) {
+  const level = day.count > 0 ? 0.15 + 0.85 * Math.min(1, day.count / habit.target) : 0;
+  return [
+    '<span class="heatmap-day', day.count > 0 ? " active" : "", '" style="--level:', level,
+    column ? ";grid-column:" + column : "", row ? ";grid-row:" + row : "",
+    '" data-date="', escapeHtml(day.date),
+    '" data-tip="', escapeHtml(formatDate(day.date) + ": " + day.count + "/" + habit.target),
+    '" aria-label="', escapeHtml(formatDate(day.date) + ", " + day.count + " of " + habit.target), '"></span>',
+  ].join("");
+}
+
+function heatmapTooltip() {
+  let tooltip = document.getElementById("heatmap-tooltip");
+  if (tooltip) return tooltip;
+  tooltip = document.createElement("div");
+  tooltip.id = "heatmap-tooltip";
+  tooltip.className = "heatmap-tooltip";
+  tooltip.setAttribute("role", "tooltip");
+  tooltip.hidden = true;
+  document.body.appendChild(tooltip);
+  return tooltip;
+}
+
+function showHeatmapTooltip(day) {
+  const tooltip = heatmapTooltip();
+  tooltip.textContent = day.dataset.tip || "";
+  tooltip.hidden = false;
+
+  const dayRect = day.getBoundingClientRect();
+  const tooltipRect = tooltip.getBoundingClientRect();
+  const left = clamp(
+    dayRect.left + dayRect.width / 2 - tooltipRect.width / 2,
+    8,
+    window.innerWidth - tooltipRect.width - 8,
+  );
+  const preferredTop = dayRect.top - tooltipRect.height - 8;
+  const top = preferredTop >= 8 ? preferredTop : dayRect.bottom + 8;
+
+  tooltip.style.left = Math.round(left) + "px";
+  tooltip.style.top = Math.round(top) + "px";
+}
+
+function hideHeatmapTooltip() {
+  activeHeatmapDay = null;
+  const tooltip = document.getElementById("heatmap-tooltip");
+  if (tooltip) tooltip.hidden = true;
+}
+
+function habitStat(value, label) {
+  return '<div class="habit-stat"><strong>' + value + " <small>days</small></strong><span>" + label + "</span></div>";
+}
+
+function bindDashboard() {
+  document.querySelector("[data-add-habit]").addEventListener("click", () => openHabitDialog(null));
+  document.querySelectorAll("[data-habit-id]").forEach((card) => {
+    const habit = state.habits.find((item) => item.id === card.dataset.habitId);
+    const settings = card.querySelector("[data-habit-settings]");
+    settings.addEventListener("click", () => openHabitDialog(habit));
+    const dateRange = card.querySelector("[data-date-range]");
+    dateRange.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openDateRangePopover(dateRange);
+    });
+    const completion = card.querySelector("[data-completion]");
+    if (completion) {
+      completion.addEventListener("click", () =>
+        updateProgress(habit, "/completion", "PUT", { completed: completion.dataset.completion === "true" }),
       );
-      error.status = response.status;
-      throw error;
     }
-    return data;
-  }
+    const increment = card.querySelector("[data-increment]");
+    if (increment) increment.addEventListener("click", () => updateProgress(habit, "/increment", "POST"));
+    const decrement = card.querySelector("[data-decrement]");
+    if (decrement) decrement.addEventListener("click", () => updateProgress(habit, "/decrement", "POST"));
+  });
+}
 
-  function route() {
-    const value = location.hash.slice(1);
-    if (!state.profile) return value === 'signup' ? 'signup' : 'login';
-    return ['activity', 'appearance'].includes(value) ? value : 'habits';
-  }
-  function view(h) {
-    const saved = ui.views[h.id];
-    if (
-      saved &&
-      ['7', '12', '26', '52', 'custom'].includes(saved.range) &&
-      (saved.range !== 'custom' ||
-        (validDate(saved.start) &&
-          validDate(saved.end) &&
-          saved.start <= saved.end &&
-          saved.end <= today() &&
-          datesBetween(saved.start, saved.end).length <= 366))
-    )
-      return saved;
-    return { range: '26' };
-  }
-  function bounds(h) {
-    const v = view(h);
-    return v.range === 'custom'
-      ? { start: v.start, end: v.end }
-      : { start: shift(today(), -Number(v.range) * 7 + 1), end: today() };
-  }
-  function queryFor(h) {
-    const v = view(h);
-    return v.range === 'custom' ? `start=${v.start}&end=${v.end}` : `days=${Number(v.range) * 7}`;
-  }
+function openDateRangePopover(button) {
+  document.querySelectorAll("[data-date-popover]").forEach((item) => item.remove());
+  const popover = document.createElement("div");
+  popover.className = "date-popover";
+  popover.dataset.datePopover = "";
+  popover.setAttribute("role", "menu");
+  popover.innerHTML = [
+    '<p>Show activity from</p>',
+    [
+      [28, "Last 4 weeks"],
+      [84, "Last 12 weeks"],
+      [182, "Last 26 weeks"],
+    ].map(([days, label]) =>
+      '<button type="button" role="menuitem" data-range-days="' + days + '" class="' +
+      (state.heatmapDays === days ? "active" : "") + '">' + label + "</button>",
+    ).join(""),
+  ].join("");
+  button.closest(".reference-progress-panel").appendChild(popover);
+  popover.querySelectorAll("[data-range-days]").forEach((option) => {
+    option.addEventListener("click", () => {
+      state.heatmapDays = Number(option.dataset.rangeDays);
+      localStorage.setItem("davamly-heatmap-days", String(state.heatmapDays));
+      popover.remove();
+      renderDashboard(true);
+    });
+  });
+  const close = (event) => {
+    if (!popover.contains(event.target) && event.target !== button) {
+      popover.remove();
+      document.removeEventListener("click", close);
+    }
+  };
+  window.setTimeout(() => document.addEventListener("click", close), 0);
+}
 
-  async function refreshHabit(h) {
-    const query = queryFor(h);
-    const [days, statistics] = await Promise.all([
-      api(`/api/habits/${h.id}/heatmap?${query}`),
-      api(`/api/habits/${h.id}/statistics?${query}`),
+async function updateProgress(habit, suffix, method, body) {
+  try {
+    await api("/api/habits/" + habit.id + suffix, { method, body });
+    await renderDashboard(true);
+  } catch (failure) {
+    showToast(failure.message, "error");
+  }
+}
+
+function openHabitDialog(habit) {
+  const editing = Boolean(habit);
+  const dialog = document.createElement("dialog");
+  dialog.innerHTML = [
+    '<div class="dialog-inner"><div class="dialog-header"><div><h2>',
+    editing ? "Habit settings" : "Create a habit", "</h2></div>",
+    '<button class="icon-btn" type="button" data-close-dialog aria-label="Close">', iconMarkup("close"), "</button></div>",
+    '<form id="habit-form" class="form-grid">',
+    '<div class="field"><label for="habit-name">Habit name</label><input id="habit-name" maxlength="60" required placeholder="e.g. Read every day" value="',
+    escapeHtml(habit ? habit.name : ""), '" /></div>',
+    '<div class="field"><span class="field-label">Tracking type</span><div class="choice-row">',
+    choiceMarkup("completion", "Once a day", !habit || habit.kind === "completion", editing),
+    choiceMarkup("counter", "Quantity", habit && habit.kind === "counter", editing),
+    "</div>",
+    editing ? '<span class="field-hint">Tracking type can’t be changed after creation.</span>' : "",
+    "</div>",
+    '<div class="form-row" data-target-fields><div class="field"><label for="habit-target">Daily target</label><input id="habit-target" type="number" min="1" max="999" value="',
+    habit ? habit.target : 5, '" /></div><div class="field"><label for="habit-unit">Unit</label><input id="habit-unit" maxlength="20" placeholder="pages, glasses…" value="',
+    escapeHtml(habit ? habit.unit : "times"), '" /></div></div>',
+    '<label class="check-field"><input id="habit-default" type="checkbox" ',
+    habit && habit.defaultHabit ? "checked" : "", ' /><span>Make this my default habit</span></label>',
+    '<p id="habit-error" class="form-error" role="alert"></p>',
+    '<div class="dialog-actions">',
+    editing ? '<button class="btn btn-danger" type="button" data-delete-habit>Delete</button>' : "",
+    '<button class="btn btn-secondary" type="button" data-close-dialog>Cancel</button>',
+    '<button class="btn btn-primary" type="submit">Save habit</button>',
+    "</div></form></div>",
+  ].join("");
+  document.body.appendChild(dialog);
+  document.body.classList.add("modal-open");
+  dialog.showModal();
+
+  const form = dialog.querySelector("#habit-form");
+  const typeInputs = [...dialog.querySelectorAll('input[name="habit-kind"]')];
+  const updateKind = () => {
+    const selected = typeInputs.find((input) => input.checked).value;
+    const fields = dialog.querySelector("[data-target-fields]");
+    fields.hidden = selected === "completion";
+    fields.querySelectorAll("input").forEach((input) => {
+      input.disabled = selected === "completion";
+      input.required = selected === "counter";
+    });
+  };
+  typeInputs.forEach((input) => input.addEventListener("change", updateKind));
+  updateKind();
+
+  const close = () => dialog.close();
+  dialog.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", close));
+  dialog.addEventListener("close", () => {
+    document.body.classList.remove("modal-open");
+    dialog.remove();
+  });
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) close();
+  });
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submit = form.querySelector('button[type="submit"]');
+    const error = dialog.querySelector("#habit-error");
+    const kind = editing ? habit.kind : typeInputs.find((input) => input.checked).value;
+    const payload = {
+      name: dialog.querySelector("#habit-name").value.trim(),
+      kind,
+      target: kind === "completion" ? null : Number(dialog.querySelector("#habit-target").value),
+      unit: kind === "completion" ? "days" : dialog.querySelector("#habit-unit").value.trim(),
+      defaultHabit: dialog.querySelector("#habit-default").checked,
+    };
+    submit.disabled = true;
+    error.textContent = "";
+    try {
+      await api(editing ? "/api/habits/" + habit.id : "/api/habits", {
+        method: editing ? "PUT" : "POST",
+        body: payload,
+      });
+      close();
+      showToast(editing ? "Habit updated." : "Habit created.");
+      await renderDashboard(true);
+    } catch (failure) {
+      error.textContent = failure.message;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  const deleteButton = dialog.querySelector("[data-delete-habit]");
+  if (deleteButton) {
+    deleteButton.addEventListener("click", async () => {
+      if (!window.confirm('Delete "' + habit.name + '" and its progress history?')) return;
+      deleteButton.disabled = true;
+      try {
+        await api("/api/habits/" + habit.id, { method: "DELETE" });
+        close();
+        showToast("Habit deleted.");
+        await renderDashboard(true);
+      } catch (failure) {
+        dialog.querySelector("#habit-error").textContent = failure.message;
+        deleteButton.disabled = false;
+      }
+    });
+  }
+}
+
+function choiceMarkup(value, label, checked, disabled = false) {
+  return [
+    '<label class="choice-card', disabled ? " is-locked" : "", '"><input type="radio" name="habit-kind" value="', value, '" ',
+    checked ? "checked " : "", disabled ? "disabled" : "", ' /><span>', label, "</span></label>",
+  ].join("");
+}
+
+async function renderActivity() {
+  document.title = "Activity — davamly";
+  app.innerHTML = [
+    appHeader("/activity"),
+    '<main id="main-content" class="app-main"><div class="app-page">',
+    '<div class="activity-list" data-activity-list><div class="loading-view" style="min-height: 280px"><span class="loading-mark"></span></div></div>',
+    "</div></main>",
+  ].join("");
+  try {
+    const result = await api("/api/activity?page=0&size=50");
+    drawActivity(result);
+  } catch (failure) {
+    handlePageFailure(failure);
+  }
+}
+
+function drawActivity(result) {
+  const list = document.querySelector("[data-activity-list]");
+  if (!result.items.length) {
+    list.innerHTML = '<div class="empty-state"><div><h2>No activity yet.</h2><p>Complete a habit and it will appear here.</p><a class="btn btn-primary" href="/app" data-route="/app">Go home</a></div></div>';
+    return;
+  }
+  list.innerHTML = result.items.map(activityMarkup).join("");
+}
+
+function activityMarkup(item) {
+  const actions = {
+    complete: ["Completed", "✓"],
+    undo: ["Undid", "↶"],
+    increment: ["Added progress to", "+"],
+    decrement: ["Reduced progress for", "−"],
+  };
+  const details = actions[item.action] || ["Updated", "•"];
+  return [
+    '<article class="activity-item"><div class="activity-icon" aria-hidden="true">', details[1], "</div>",
+    "<div><h3>", details[0], " ", escapeHtml(item.name), "</h3><p>",
+    item.count, " ", escapeHtml(item.unit), " on ", formatDate(item.date), "</p></div>",
+    '<time class="activity-time" datetime="', escapeHtml(item.createdAt), '">', escapeHtml(relativeTime(item.createdAt)), "</time></article>",
+  ].join("");
+}
+
+async function renderProfile() {
+  document.title = "Profile — davamly";
+  app.innerHTML = [
+    appHeader("/profile"),
+    '<main id="main-content" class="app-main"><div class="app-page">',
+    '<div class="loading-view" style="min-height: 55vh"><span class="loading-mark"></span></div>',
+    "</div></main>",
+  ].join("");
+  try {
+    const [user, statistics] = await Promise.all([
+      api("/api/auth/me"),
+      api("/api/users/me/statistics"),
     ]);
-    state.maps.set(h.id, new Map(days.map((d) => [d.date, d.count])));
-    state.stats.set(h.id, statistics);
+    state.user = user;
+    drawProfile(statistics);
+  } catch (failure) {
+    handlePageFailure(failure);
   }
-  async function loadHabits() {
-    state.habits = await api('/api/habits');
-    const ids = new Set(state.habits.map((h) => h.id));
-    [...state.maps.keys()].filter((id) => !ids.has(id)).forEach((id) => state.maps.delete(id));
-    [...state.stats.keys()].filter((id) => !ids.has(id)).forEach((id) => state.stats.delete(id));
-    await Promise.all(state.habits.map(refreshHabit));
-  }
-  async function loadActivity(reset = true) {
-    if (state.activityLoading) return;
-    state.activityLoading = true;
-    state.activityError = '';
+}
+
+function drawProfile(statistics) {
+  const values = [
+    statistics.totalHabits,
+    statistics.completedDays,
+    statistics.currentStreak,
+    statistics.longestStreak,
+  ];
+  const labels = ["Habits", "Completed", "Current streak", "Longest streak"];
+  const max = Math.max(1, ...values);
+  const page = document.querySelector(".app-page");
+  page.innerHTML = [
+    '<div class="profile-grid"><section class="profile-card"><h2>Your progress</h2>',
+    '<div class="profile-stats">',
+    values.map((value) => {
+      const height = value === 0 ? 18 : 28 + Math.round((value / max) * 72);
+      return '<div class="stat-bar"><div class="stat-bar-fill" style="height:' + height + '%"><strong>' + value + "</strong></div></div>";
+    }).join(""),
+    '</div><div class="stat-labels">',
+    labels.map((label) => "<span>" + label + "</span>").join(""),
+    "</div></section>",
+    '<div class="profile-forms">',
+    '<section class="profile-card"><h2>Profile details</h2><form id="profile-form" class="form-grid">',
+    profileField("profile-username", "Username", state.user.usernameLabel || state.user.username, "username", 40),
+    '<p id="profile-error" class="form-error" role="alert"></p>',
+    '<button class="btn btn-primary" type="submit">Save changes</button></form></section>',
+    '<section class="profile-card"><h2>Change password</h2><form id="password-form" class="form-grid">',
+    passwordFieldMarkup("current-password", "Current password", "Your current password", "current-password"),
+    passwordFieldMarkup("new-password", "New password", "At least 8 characters", "new-password"),
+    passwordFieldMarkup("confirm-password", "Confirm new password", "Repeat the new password", "new-password"),
+    '<p id="password-error" class="form-error" role="alert"></p>',
+    '<button class="btn btn-primary" type="submit">Update password</button></form></section>',
+    '<section class="profile-card danger-zone"><h2>Delete account</h2>',
+    "<p>This permanently removes your profile, habits, progress and activity.</p>",
+    '<button class="btn btn-danger" type="button" data-delete-account>Delete account</button>',
+    "</section></div></div>",
+  ].join("");
+  bindProfile();
+}
+
+function profileField(id, label, value, autocomplete, max) {
+  return [
+    '<div class="field"><label for="', id, '">', label, '</label><input id="', id,
+    '" value="', escapeHtml(value), '" autocomplete="', autocomplete, '" maxlength="', max,
+    '" required /></div>',
+  ].join("");
+}
+
+function bindProfile() {
+  bindPasswordToggles();
+
+  const profileForm = document.getElementById("profile-form");
+  profileForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const error = document.getElementById("profile-error");
+    const submit = profileForm.querySelector('button[type="submit"]');
+    error.textContent = "";
+    submit.disabled = true;
     try {
-      const pageNumber = reset ? 0 : state.activityPage + 1;
-      const page = await api(`/api/activity?page=${pageNumber}&size=30`);
-      state.activity = reset ? page.items : [...state.activity, ...page.items];
-      state.activityPage = page.page;
-      state.activityHasNext = page.hasNext;
-      state.activityLoaded = true;
-    } finally {
-      state.activityLoading = false;
-    }
-  }
-  async function reloadAfterChange() {
-    await loadHabits();
-    if (state.activityLoaded) await loadActivity(true);
-    render();
-  }
-  async function start() {
-    applyTheme();
-    try {
-      await csrf();
-      state.profile = await api('/api/auth/me');
-      await loadHabits();
-      if (route() === 'activity') await loadActivity();
-    } catch (error) {
-      if (error.status !== 401) showAuthError(error.message);
-      state.profile = null;
-    } finally {
-      state.loading = false;
-      render();
-    }
-  }
-
-  function render() {
-    const page = route(),
-      signedIn = !!state.profile;
-    $('loading').hidden = !state.loading;
-    $('login').hidden = state.loading || signedIn;
-    $('dashboard').hidden = !signedIn || page !== 'habits';
-    $('activity-page').hidden = !signedIn || page !== 'activity';
-    $('appearance').hidden = !signedIn || page !== 'appearance';
-    $('nav-links').hidden = !signedIn;
-    document.querySelector('.account').hidden = !signedIn;
-    if (!signedIn) {
-      setAuthMode(page === 'signup' ? 'signup' : 'login', false);
-      return;
-    }
-    $('user-name').textContent = state.profile.name;
-    document
-      .querySelectorAll('[data-page]')
-      .forEach((link) => link.toggleAttribute('aria-current', link.dataset.page === page));
-    document.title = `${page[0].toUpperCase() + page.slice(1)} — davamly`;
-    renderCards();
-    renderActivity();
-  }
-
-  function drawMap(host, h) {
-    const { start, end } = bounds(h),
-      counts = state.maps.get(h.id) || new Map();
-    const monday = shift(start, -((parse(start).getUTCDay() + 6) % 7)),
-      sunday = shift(end, 6 - ((parse(end).getUTCDay() + 6) % 7));
-    const weeks = [];
-    for (let w = monday; w <= sunday; w = shift(w, 7)) weeks.push(w);
-    const width = Math.max(0, (host.clientWidth || host.getBoundingClientRect().width || 800) - 4),
-      height = Math.max(1, (host.clientHeight || host.getBoundingClientRect().height || 230) - 4);
-    const gap = width < 400 ? 2 : 4,
-      blockGap = 8,
-      monthHeight = 14;
-    let layout = null;
-    for (let requested = 1; requested <= Math.min(weeks.length, 8); requested++) {
-      const cols = Math.ceil(weeks.length / requested),
-        blocks = Math.ceil(weeks.length / cols),
-        cellWidth = (width - 32 - cols * gap) / cols,
-        rowHeight = ((height - (blocks - 1) * blockGap) / blocks - monthHeight - 7 * gap) / 7;
-      if (rowHeight <= 0 || cellWidth <= 0) continue;
-      const score = Math.min(cellWidth, rowHeight);
-      if (!layout || score > layout.score)
-        layout = { columns: cols, cellHeight: Math.min(30, rowHeight), score };
-    }
-    const { columns, cellHeight } = layout || {
-      columns: weeks.length,
-      cellHeight: 1,
-    };
-    host.style.setProperty('--cell-height', `${cellHeight}px`);
-    host.style.setProperty('--map-gap', `${gap}px`);
-    host.style.setProperty('--block-gap', `${blockGap}px`);
-    host.style.setProperty('--month-height', `${monthHeight}px`);
-    host.replaceChildren();
-    for (let offset = 0; offset < weeks.length; offset += columns) {
-      const chunk = weeks.slice(offset, offset + columns),
-        map = el('div', undefined, 'heatmap');
-      map.style.setProperty('--weeks', columns);
-      map.setAttribute(
-        'aria-label',
-        `${h.name}: ${format(chunk[0])} to ${format(shift(chunk.at(-1), 6))}`,
-      );
-      const corner = el('span', '');
-      corner.style.gridColumn = '1';
-      corner.style.gridRow = '1';
-      map.append(corner);
-      ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].forEach((day, i) => {
-        const label = el('span', day, 'day-label');
-        label.style.gridColumn = '1';
-        label.style.gridRow = String(i + 2);
-        map.append(label);
-      });
-      let previousMonth = -1;
-      chunk.forEach((week, j) => {
-        const weekEnd = shift(week, 6),
-          labelDate = parse(week).getUTCMonth() !== parse(weekEnd).getUTCMonth() ? weekEnd : week,
-          month = parse(labelDate).getUTCMonth();
-        const label = el(
-          'span',
-          month !== previousMonth
-            ? parse(labelDate).toLocaleDateString('en-US', {
-                timeZone: 'UTC',
-                month: 'short',
-              })
-            : '',
-          'month-label',
-        );
-        label.style.gridColumn = String(j + 2);
-        label.style.gridRow = '1';
-        previousMonth = month;
-        map.append(label);
-        for (let i = 0; i < 7; i++) {
-          const date = shift(week, i),
-            count = counts.get(date) || 0,
-            cell = el('span', undefined, 'cell');
-          cell.setAttribute('role', 'img');
-          cell.style.gridColumn = String(j + 2);
-          cell.style.gridRow = String(i + 2);
-          cell.dataset.level = String(
-            !count
-              ? 0
-              : isCounter(h)
-                ? Math.min(4, Math.max(1, Math.floor((count / h.target) * 4)))
-                : 4,
-          );
-          cell.classList.toggle('future', date < start || date > end || date > today());
-          const status = isCounter(h)
-            ? `${count} / ${h.target} ${h.unit}`
-            : count
-              ? 'completed'
-              : '—';
-          const text = `${h.name}, ${format(date)}: ${status}`;
-          cell.title = text;
-          cell.setAttribute('aria-label', text);
-          map.append(cell);
-        }
-      });
-      host.append(map);
-    }
-  }
-
-  function makeCard(h) {
-    const { start, end } = bounds(h),
-      card = el('article', undefined, 'panel heatmap-panel'),
-      heading = el('div', undefined, 'card-heading'),
-      copy = el('div', undefined, 'habit-heading'),
-      title = el('h2', h.name),
-      v = view(h);
-    title.id = `habit-title-${h.id}`;
-    card.setAttribute('aria-labelledby', title.id);
-    copy.append(title);
-    if (h.description) copy.append(el('p', h.description, 'subtle habit-description'));
-    heading.append(
-      copy,
-      el('span', v.range === 'custom' ? 'Custom range' : `Last ${v.range} weeks`, 'pill'),
-    );
-    card.append(heading, el('p', `${format(start)} – ${format(end)}`, 'map-dates'));
-    const host = el('div', undefined, 'map-blocks');
-    host.dataset.map = h.id;
-    card.append(host);
-    const footer = el('div', undefined, 'map-footer'),
-      legend = el('div', undefined, 'legend');
-    if (isCounter(h)) {
-      legend.append(el('span', 'Less'));
-      for (let level = 1; level <= 4; level++) {
-        const swatch = el('i', undefined, 'intensity-swatch');
-        swatch.dataset.level = String(level);
-        legend.append(swatch);
-      }
-      legend.append(el('span', 'More'));
-    } else legend.append(el('i', undefined, 'legend-done'), el('span', 'Completed'));
-    footer.append(legend);
-    card.append(footer);
-    const summary = state.stats.get(h.id) || {
-        currentStreak: 0,
-        longestStreak: 0,
-      },
-      metrics = el('div', undefined, 'habit-metrics');
-    [
-      [`${summary.currentStreak} days`, 'Current streak'],
-      [`${summary.longestStreak} days`, 'Longest streak'],
-    ].forEach(([value, label]) => {
-      const metric = el('div');
-      metric.append(el('strong', value), el('span', label));
-      metrics.append(metric);
-    });
-    card.append(metrics);
-    return card;
-  }
-
-  function inlineError(host, message) {
-    let error = host.querySelector('.control-error');
-    if (!error) {
-      error = el('p', undefined, 'error control-error');
-      error.setAttribute('role', 'alert');
-      const actions = host.querySelector('.control-actions');
-      if (actions) actions.before(error);
-      else host.append(error);
-    }
-    error.textContent = message;
-  }
-  async function manage(host, action) {
-    host.querySelector('.control-error')?.remove();
-    host.setAttribute('aria-busy', 'true');
-    try {
-      await action();
-    } catch (error) {
-      inlineError(host, error.message);
-    } finally {
-      host.removeAttribute('aria-busy');
-    }
-  }
-  function makeControls(h) {
-    const aside = el('aside', undefined, 'panel habit-controls');
-    aside.dataset.controls = h.id;
-    aside.setAttribute('aria-label', `Manage ${h.name}`);
-    aside.append(
-      el('h3', 'Manage habit'),
-      el('p', isCounter(h) ? `${h.name} · Counter` : h.name, 'control-habit-name'),
-    );
-    if (isCounter(h)) {
-      const status = el('div', undefined, 'counter-status'),
-        numbers = el('div', undefined, 'counter-numbers');
-      numbers.append(
-        el('strong', String(h.todayCount)),
-        el('span', `/ ${h.target} ${h.unit} today`),
-      );
-      const meter = el('progress');
-      meter.max = h.target;
-      meter.value = Math.min(h.todayCount, h.target);
-      meter.setAttribute('aria-label', `${h.name} daily goal`);
-      status.append(numbers, meter);
-      aside.append(status);
-    }
-    const prefix = `range-${h.id}`,
-      label = el('label', 'Date range'),
-      select = el('select');
-    label.htmlFor = prefix;
-    select.id = prefix;
-    [
-      ['7', 'Last 7 weeks'],
-      ['12', 'Last 12 weeks'],
-      ['26', 'Last 26 weeks'],
-      ['52', 'Last 52 weeks'],
-      ['custom', 'Custom range'],
-    ].forEach(([value, text]) => select.append(new Option(text, value)));
-    select.value = view(h).range;
-    const custom = el('div', undefined, 'custom-dates'),
-      b = bounds(h),
-      start = el('input'),
-      end = el('input'),
-      error = el('p', undefined, 'error');
-    start.type = end.type = 'date';
-    start.value = b.start;
-    end.value = b.end;
-    start.max = end.max = today();
-    start.id = `${prefix}-start`;
-    end.id = `${prefix}-end`;
-    const startLabel = el('label', 'Start date'),
-      endLabel = el('label', 'End date');
-    startLabel.htmlFor = start.id;
-    endLabel.htmlFor = end.id;
-    error.setAttribute('role', 'alert');
-    const apply = button('Apply', null, null, 'secondary');
-    custom.append(startLabel, start, endLabel, end, apply, error);
-    custom.hidden = view(h).range !== 'custom';
-    select.onchange = () => {
-      if (select.value === 'custom') {
-        custom.hidden = false;
-        return;
-      }
-      ui.views[h.id] = { range: select.value };
-      persistUi();
-      manage(aside, async () => {
-        await refreshHabit(h);
-        render();
-      });
-    };
-    apply.onclick = () => {
-      if (
-        !validDate(start.value) ||
-        !validDate(end.value) ||
-        start.value > end.value ||
-        end.value > today() ||
-        datesBetween(start.value, end.value).length > 366
-      ) {
-        error.textContent = 'Choose up to 366 days, ending no later than today.';
-        return;
-      }
-      ui.views[h.id] = { range: 'custom', start: start.value, end: end.value };
-      persistUi();
-      manage(aside, async () => {
-        await refreshHabit(h);
-        render();
-      });
-    };
-    aside.append(label, select, custom);
-    const actions = el('div', undefined, 'control-actions');
-    if (isCounter(h)) {
-      const stepper = el('div', undefined, 'counter-stepper'),
-        minus = button(
-          '',
-          'minus',
-          () =>
-            manage(aside, async () => {
-              await api(`/api/habits/${h.id}/decrement`, { method: 'POST' });
-              await reloadAfterChange();
-            }),
-          'decrement-today',
-        ),
-        plus = button(
-          '',
-          'plus',
-          () =>
-            manage(aside, async () => {
-              await api(`/api/habits/${h.id}/increment`, { method: 'POST' });
-              await reloadAfterChange();
-            }),
-          'complete-today',
-        );
-      minus.setAttribute('aria-label', `Remove one ${h.unit}`);
-      plus.setAttribute('aria-label', `Add one ${h.unit}`);
-      minus.disabled = h.todayCount === 0;
-      plus.disabled = h.todayCount >= 9999;
-      stepper.append(minus, plus);
-      actions.append(stepper);
-    } else {
-      const complete = button(
-        h.completed ? 'Undo completion' : 'Complete today',
-        h.completed ? 'rotate-left' : 'check',
-        () =>
-          manage(aside, async () => {
-            await api(`/api/habits/${h.id}/completion`, {
-              method: 'PUT',
-              body: JSON.stringify({ completed: !h.completed }),
-            });
-            await reloadAfterChange();
-          }),
-        'complete-today',
-      );
-      complete.setAttribute('aria-pressed', String(h.completed));
-      actions.append(complete);
-    }
-    actions.append(
-      button('Edit habit', 'pen', () => openEditor('edit', h.id), 'secondary'),
-      button('Delete habit', 'trash-can', () => openEditor('delete', h.id), 'danger-text'),
-    );
-    aside.append(actions);
-    return aside;
-  }
-
-  function renderCards() {
-    mapObserver?.disconnect();
-    const root = $('habit-cards');
-    root.replaceChildren();
-    state.habits.forEach((h) => {
-      const row = el('section', undefined, 'habit-row');
-      row.append(makeCard(h), makeControls(h));
-      root.append(row);
-    });
-    const hosts = [...root.querySelectorAll('.map-blocks')];
-    hosts.forEach((host) =>
-      drawMap(
-        host,
-        state.habits.find((h) => h.id === host.dataset.map),
-      ),
-    );
-    if (typeof ResizeObserver !== 'undefined') {
-      const sizes = new WeakMap();
-      mapObserver = new ResizeObserver((entries) =>
-        entries.forEach(({ target, contentRect }) => {
-          const size = `${Math.round(contentRect.width)}:${Math.round(contentRect.height)}`;
-          if (sizes.get(target) === size) return;
-          sizes.set(target, size);
-          const h = state.habits.find((item) => item.id === target.dataset.map);
-          if (h) drawMap(target, h);
-        }),
-      );
-      hosts.forEach((host) => mapObserver.observe(host));
-    }
-  }
-
-  function renderActivity() {
-    const list = $('activity-list');
-    list.replaceChildren();
-    if (!state.activityLoaded) {
-      list.append(el('p', 'Loading activity…', 'empty'));
-      return;
-    }
-    if (!state.activity.length) {
-      list.append(el('p', 'No activity yet.', 'empty'));
-      return;
-    }
-    state.activity.forEach((event) => {
-      const row = el('div', undefined, 'history-row'),
-        time = el('time', format(event.date));
-      time.dateTime = event.createdAt;
-      time.append(
-        el(
-          'small',
-          new Date(event.createdAt).toLocaleTimeString('en-GB', {
-            hour: '2-digit',
-            minute: '2-digit',
-          }),
-          'history-detail',
-        ),
-      );
-      const detail = el('div'),
-        labels = {
-          complete: 'Completed',
-          undo: 'Completion undone',
-          increment: `Increased · ${event.count} ${event.unit}`,
-          decrement: `Decreased · ${event.count} ${event.unit}`,
-        };
-      detail.append(
-        el('span', event.name),
-        el('small', labels[event.action] || event.action, 'history-detail'),
-      );
-      row.append(detail, time);
-      list.append(row);
-    });
-    if (state.activityError) list.append(el('p', state.activityError, 'error activity-error'));
-    if (state.activityHasNext) {
-      const more = button(
-        state.activityLoading ? 'Loading' : 'Load more',
-        state.activityLoading ? 'circle-notch fa-spin' : 'chevron-down',
-        async () => {
-          more.disabled = true;
-          try {
-            await loadActivity(false);
-          } catch (error) {
-            state.activityError = error.message;
-          }
-          renderActivity();
+      state.user = await api("/api/users/me", {
+        method: "PATCH",
+        body: {
+          username: document.getElementById("profile-username").value.trim(),
+          timezone: state.user.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
         },
-        'secondary activity-more',
-      );
-      more.disabled = state.activityLoading;
-      list.append(more);
-    }
-  }
-
-  function field(label, id, value, max, area = false) {
-    const l = el('label', label);
-    l.htmlFor = id;
-    const input = el(area ? 'textarea' : 'input');
-    input.id = id;
-    input.maxLength = max;
-    input.value = value;
-    input.required = !area;
-    input.autocomplete = 'off';
-    return [l, input];
-  }
-  function habitFields(fields, h) {
-    const label = el('label', 'Tracking type'),
-      select = el('select');
-    select.id = 'habit-kind';
-    label.htmlFor = select.id;
-    select.append(
-      new Option('Completion — once a day', 'completion'),
-      new Option('Counter — multiple times a day', 'counter'),
-    );
-    select.value = h?.kind || 'completion';
-    select.disabled = !!h;
-    fields.append(label, select);
-    if (select.disabled)
-      fields.append(el('p', 'Tracking type cannot be changed after creation.', 'field-note'));
-    const counter = el('div', undefined, 'counter-settings'),
-      targetLabel = el('label', 'Daily target'),
-      target = el('input'),
-      unitLabel = el('label', 'Unit'),
-      unit = el('input');
-    target.id = 'habit-target';
-    targetLabel.htmlFor = target.id;
-    target.type = 'number';
-    target.min = '1';
-    target.max = '999';
-    target.value = h?.target || 5;
-    unit.id = 'habit-unit';
-    unitLabel.htmlFor = unit.id;
-    unit.maxLength = 20;
-    unit.value = h?.unit || 'times';
-    counter.append(targetLabel, target, unitLabel, unit);
-    fields.append(counter);
-    const update = () => {
-      counter.hidden = select.value !== 'counter';
-      target.disabled = unit.disabled = counter.hidden;
-      target.required = !counter.hidden;
-    };
-    select.onchange = update;
-    update();
-  }
-  function openEditor(mode, id = null) {
-    editingId = id;
-    editorMode = mode;
-    const fields = $('editor-fields');
-    fields.replaceChildren();
-    $('editor-error').textContent = '';
-    $('save-button').textContent =
-      mode === 'delete' ? 'Delete habit' : mode === 'delete-account' ? 'Delete account' : 'Save';
-    const h = state.habits.find((item) => item.id === id);
-    if ((mode === 'edit' || mode === 'delete') && !h) return;
-    if (mode === 'profile') {
-      $('editor-title').textContent = 'Edit profile';
-      fields.append(
-        ...field('Name', 'name', state.profile.name, 40),
-        ...field('About', 'description', state.profile.bio || '', 240, true),
-      );
-    } else if (mode === 'delete') {
-      $('editor-title').textContent = 'Delete habit?';
-      fields.append(
-        el(
-          'p',
-          `Delete “${h.name}”, its heatmap and all completion history? This cannot be undone.`,
-        ),
-      );
-    } else if (mode === 'delete-account') {
-      $('editor-title').textContent = 'Delete account?';
-      fields.append(
-        el(
-          'p',
-          'Delete your account, habits, activity and profile permanently? This cannot be undone.',
-        ),
-      );
-    } else {
-      $('editor-title').textContent = mode === 'edit' ? 'Edit habit' : 'New habit';
-      fields.append(
-        ...field('Habit name', 'name', h?.name || '', 60),
-        ...field('Description', 'description', h?.description || '', 240, true),
-      );
-      habitFields(fields, h);
-    }
-    $('editor').showModal();
-  }
-  $('editor-form').onsubmit = async (event) => {
-    event.preventDefault();
-    $('editor-error').textContent = '';
-    $('save-button').disabled = true;
-    try {
-      if (editorMode === 'delete-account') {
-        await api('/api/users/me', { method: 'DELETE' });
-        $('editor').close();
-        clearAuthenticatedState();
-        return;
-      }
-      if (editorMode === 'delete') await api(`/api/habits/${editingId}`, { method: 'DELETE' });
-      else {
-        const name = $('name').value.trim(),
-          description = $('description').value.trim();
-        if (!name) throw new Error('Enter a name.');
-        if (editorMode === 'profile')
-          state.profile = await api('/api/users/me', {
-            method: 'PATCH',
-            body: JSON.stringify({
-              name,
-              bio: description,
-              timezone: state.profile.timezone,
-            }),
-          });
-        else {
-          const kind = $('habit-kind').value,
-            target = Number($('habit-target').value),
-            payload = {
-              name,
-              description,
-              kind,
-              target: kind === 'counter' ? target : 1,
-              unit: $('habit-unit').value.trim() || 'times',
-            };
-          if (kind === 'counter' && (!Number.isInteger(target) || target < 1 || target > 999))
-            throw new Error('Daily target must be a whole number from 1 to 999.');
-          await api(editorMode === 'edit' ? `/api/habits/${editingId}` : '/api/habits', {
-            method: editorMode === 'edit' ? 'PUT' : 'POST',
-            body: JSON.stringify(payload),
-          });
-        }
-      }
-      $('editor').close();
-      await reloadAfterChange();
-    } catch (error) {
-      $('editor-error').textContent = error.message;
+      });
+      showToast("Profile updated.");
+      drawProfile(await api("/api/users/me/statistics"));
+    } catch (failure) {
+      error.textContent = failure.message;
     } finally {
-      $('save-button').disabled = false;
+      submit.disabled = false;
     }
-  };
+  });
 
-  function showAuthError(message = '') {
-    $('auth-error').textContent = message;
-  }
-  function setAuthMode(mode, updateHash = true) {
-    authMode = mode;
-    $('auth-title').textContent = mode === 'signup' ? 'Create account' : 'Sign in';
-    $('auth-submit').querySelector('span').textContent =
-      mode === 'signup' ? 'Create account' : 'Sign in';
-    $('auth-submit').querySelector('i').className =
-      `fa-solid fa-${mode === 'signup' ? 'user-plus' : 'right-to-bracket'}`;
-    $('auth-mode').querySelector('span').textContent =
-      mode === 'signup' ? 'Already have an account? Sign in' : 'Create account';
-    $('confirm-field').hidden = mode !== 'signup';
-    $('auth-confirm').required = mode === 'signup';
-    $('auth-password').autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
-    showAuthError();
-    if (updateHash) history.replaceState(null, '', mode === 'signup' ? '#signup' : '#login');
-    document.title = `${mode === 'signup' ? 'Create account' : 'Sign in'} — davamly`;
-  }
-  $('auth-mode').onclick = () => setAuthMode(authMode === 'login' ? 'signup' : 'login');
-  $('auth-form').onsubmit = async (event) => {
+  const passwordForm = document.getElementById("password-form");
+  passwordForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    showAuthError();
-    const username = $('auth-username').value.trim(),
-      password = $('auth-password').value,
-      submit = $('auth-submit');
-    if (authMode === 'signup' && password !== $('auth-confirm').value) {
-      showAuthError('Passwords do not match.');
+    const error = document.getElementById("password-error");
+    const submit = passwordForm.querySelector('button[type="submit"]');
+    const currentPassword = document.getElementById("current-password").value;
+    const newPassword = document.getElementById("new-password").value;
+    const confirmation = document.getElementById("confirm-password").value;
+    error.textContent = "";
+    if (newPassword !== confirmation) {
+      error.textContent = "New passwords do not match.";
       return;
     }
     submit.disabled = true;
     try {
-      if (authMode === 'signup')
-        await api('/api/auth/register', {
-          method: 'POST',
-          body: JSON.stringify({
-            username,
-            password,
-            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-          }),
-        });
-      state.profile = await api('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ username, password }),
+      await api("/api/users/me/password", {
+        method: "PUT",
+        body: { currentPassword, newPassword },
+        allow401: true,
       });
-      csrfInfo = null;
-      await csrf();
-      await loadHabits();
-      state.activity = [];
-      state.activityLoaded = false;
-      state.activityPage = -1;
-      state.activityHasNext = false;
-      state.activityError = '';
-      history.replaceState(null, '', '#habits');
-      $('auth-form').reset();
-      render();
-    } catch (error) {
-      showAuthError(error.message);
-    } finally {
+      state.user = null;
+      state.csrf = null;
+      showToast("Password changed. Please log in again.");
+      navigate("/login", true);
+    } catch (failure) {
+      error.textContent = failure.message;
       submit.disabled = false;
     }
-  };
+  });
 
-  function applyTheme() {
-    themeKeys.forEach((k) => {
-      document.documentElement.style.setProperty(`--theme-${k}`, ui.theme[k]);
-      $('theme-' + k).value = ui.theme[k];
-    });
-    [...$('theme-presets').children].forEach((node, i) =>
-      node.setAttribute(
-        'aria-pressed',
-        String(themeKeys.every((k) => palettes[i][k] === ui.theme[k])),
-      ),
-    );
-  }
-  palettes.forEach((p) => {
-    const pick = button(p.name, null, () => {
-        ui.theme = { ...p };
-        applyTheme();
-        persistUi();
-      }),
-      dot = el('span', undefined, 'palette-dot');
-    dot.style.background = `linear-gradient(135deg,${p.a},${p.b},${p.c})`;
-    pick.prepend(dot);
-    $('theme-presets').append(pick);
-  });
-  themeKeys.forEach(
-    (k) =>
-      ($('theme-' + k).oninput = (event) => {
-        if (/^#[0-9a-f]{6}$/i.test(event.target.value)) {
-          ui.theme = { ...ui.theme, [k]: event.target.value };
-          applyTheme();
-          persistUi();
-        }
-      }),
-  );
-  $('theme-reset').onclick = () => {
-    ui.theme = { ...palettes[0] };
-    applyTheme();
-    persistUi();
-  };
+  document.querySelector("[data-delete-account]").addEventListener("click", openDeleteAccountDialog);
+}
 
-  $('new-habit').onclick = () => openEditor('new');
-  document
-    .querySelectorAll('[data-close]')
-    .forEach((node) => (node.onclick = () => node.closest('dialog').close()));
-  $('user-button').onclick = () => {
-    const open = $('user-menu').hidden;
-    $('user-menu').hidden = !open;
-    $('user-button').setAttribute('aria-expanded', String(open));
-  };
-  const closeMenu = () => {
-    $('user-menu').hidden = true;
-    $('user-button').setAttribute('aria-expanded', 'false');
-  };
-  document.addEventListener('click', (event) => {
-    if (!event.target.closest('.account')) closeMenu();
+function openDeleteAccountDialog() {
+  const dialog = document.createElement("dialog");
+  dialog.innerHTML = [
+    '<div class="dialog-inner"><div class="dialog-header"><div>',
+    '<h2>Delete account?</h2></div><button class="icon-btn" type="button" data-close-dialog aria-label="Close">', iconMarkup("close"), "</button></div>",
+    "<p>This cannot be undone. Enter your password and type <strong>DELETE</strong> to continue.</p>",
+    '<form id="delete-form" class="form-grid">',
+    passwordFieldMarkup("delete-password", "Current password", "Your current password", "current-password"),
+    '<div class="field"><label for="delete-confirmation">Confirmation</label><input id="delete-confirmation" placeholder="Type DELETE" autocomplete="off" required /></div>',
+    '<p id="delete-error" class="form-error" role="alert"></p>',
+    '<div class="dialog-actions"><button class="btn btn-secondary" type="button" data-close-dialog>Cancel</button>',
+    '<button class="btn btn-danger" type="submit">Delete permanently</button></div></form></div>',
+  ].join("");
+  document.body.appendChild(dialog);
+  document.body.classList.add("modal-open");
+  dialog.showModal();
+  const close = () => dialog.close();
+  dialog.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", close));
+  dialog.addEventListener("close", () => {
+    document.body.classList.remove("modal-open");
+    dialog.remove();
   });
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') closeMenu();
-  });
-  document.querySelector('[data-action="profile"]').onclick = () => {
-    closeMenu();
-    openEditor('profile');
-  };
-  document.querySelector('[data-action="delete-account"]').onclick = () => {
-    closeMenu();
-    openEditor('delete-account');
-  };
-  function clearAuthenticatedState() {
-    state.profile = null;
-    state.habits = [];
-    state.maps.clear();
-    state.stats.clear();
-    state.activity = [];
-    state.activityLoaded = false;
-    state.activityPage = -1;
-    state.activityHasNext = false;
-    state.activityLoading = false;
-    state.activityError = '';
-    csrfInfo = null;
-    history.replaceState(null, '', '#login');
-    render();
-  }
-  document.querySelector('[data-action="logout"]').onclick = async () => {
-    closeMenu();
-    try {
-      await api('/api/auth/logout', { method: 'POST' });
-    } finally {
-      clearAuthenticatedState();
-    }
-  };
-  window.addEventListener('hashchange', async () => {
-    closeMenu();
-    if (!state.profile) {
-      render();
+  dialog.querySelector("#delete-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const error = dialog.querySelector("#delete-error");
+    const confirmation = dialog.querySelector("#delete-confirmation").value;
+    if (confirmation !== "DELETE") {
+      error.textContent = "Type DELETE exactly to confirm.";
       return;
     }
-    if (route() === 'activity' && !state.activityLoaded) {
-      render();
-      try {
-        await loadActivity();
-      } catch {}
+    const submit = event.currentTarget.querySelector('button[type="submit"]');
+    submit.disabled = true;
+    try {
+      await api("/api/users/me", {
+        method: "DELETE",
+        body: { currentPassword: dialog.querySelector("#delete-password").value },
+        allow401: true,
+      });
+      state.user = null;
+      state.csrf = null;
+      close();
+      showToast("Your account has been deleted.");
+      navigate("/", true);
+    } catch (failure) {
+      error.textContent = failure.message;
+      submit.disabled = false;
     }
-    render();
   });
-  start();
-})();
+}
+
+function handlePageFailure(failure) {
+  if (failure.status === 401) {
+    navigate("/login", true);
+    return;
+  }
+  app.querySelector(".app-page").innerHTML = [
+    '<div class="empty-state"><div><h2>We couldn’t load this page.</h2><p>',
+    escapeHtml(failure.message), '</p><button class="btn btn-primary" type="button" data-retry>Try again</button></div></div>',
+  ].join("");
+  app.querySelector("[data-retry]").addEventListener("click", renderRoute);
+}
+
+async function logout() {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } catch {
+    // A local logout still clears the UI when the session already expired.
+  }
+  state.user = null;
+  state.csrf = null;
+  navigate("/", true);
+}
+
+async function renderRoute() {
+  cleanupLanding();
+  cleanupLanding = () => {};
+  let path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (!["/", "/login", "/signup", "/app", "/activity", "/profile"].includes(path)) {
+    path = state.user ? "/app" : "/";
+    window.history.replaceState({}, "", path);
+  }
+  if (PROTECTED_ROUTES.has(path) && !state.user) {
+    navigate("/login", true);
+    return;
+  }
+  if ((path === "/login" || path === "/signup") && state.user) {
+    navigate("/app", true);
+    return;
+  }
+  if (path === "/") renderLanding();
+  if (path === "/login") renderAuth("login");
+  if (path === "/signup") renderAuth("signup");
+  if (path === "/app") await renderDashboard();
+  if (path === "/activity") await renderActivity();
+  if (path === "/profile") await renderProfile();
+}
+
+document.addEventListener("click", (event) => {
+  const menuButton = event.target.closest("[data-mobile-menu]");
+  if (menuButton) {
+    const open = menuButton.closest(".nav-shell").classList.toggle("menu-open");
+    menuButton.textContent = open ? "×" : "☰";
+    menuButton.setAttribute("aria-expanded", String(open));
+    menuButton.setAttribute("aria-label", open ? "Close navigation" : "Open navigation");
+    return;
+  }
+  if (!event.target.closest(".nav-shell")) closeMobileMenu();
+  const sectionLink = event.target.closest('a[href^="#"]');
+  if (sectionLink) {
+    const target = document.getElementById(sectionLink.getAttribute("href").slice(1));
+    if (target) {
+      event.preventDefault();
+      closeMobileMenu();
+      const heading = target.querySelector("h2") || target;
+      const headerHeight = document.querySelector(".nav-wrap")?.getBoundingClientRect().height || 0;
+      window.scrollTo({
+        top: Math.max(0, window.scrollY + heading.getBoundingClientRect().top - headerHeight - 16),
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
+      });
+    }
+    return;
+  }
+  const route = event.target.closest("[data-route]");
+  if (route) {
+    event.preventDefault();
+    navigate(route.dataset.route || route.getAttribute("href"));
+    return;
+  }
+  const logoutButton = event.target.closest("[data-logout]");
+  if (logoutButton) {
+    event.preventDefault();
+    logout();
+  }
+});
+
+document.addEventListener("pointerover", (event) => {
+  const day = event.target.closest(".heatmap-day[data-tip]");
+  if (!day || day === activeHeatmapDay) return;
+  activeHeatmapDay = day;
+  showHeatmapTooltip(day);
+});
+
+document.addEventListener("pointerout", (event) => {
+  const day = event.target.closest(".heatmap-day[data-tip]");
+  if (day && day === activeHeatmapDay && !day.contains(event.relatedTarget)) hideHeatmapTooltip();
+});
+
+window.addEventListener("scroll", hideHeatmapTooltip, true);
+window.addEventListener("resize", () => {
+  if (activeHeatmapDay) showHeatmapTooltip(activeHeatmapDay);
+});
+
+window.addEventListener("popstate", renderRoute);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeMobileMenu();
+});
+
+async function bootstrap() {
+  app.innerHTML = '<div class="loading-view"><span class="loading-mark" aria-label="Loading"></span></div>';
+  try {
+    await ensureCsrf(false);
+    const response = await fetch("/api/auth/me", {
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    if (response.ok) state.user = await response.json();
+  } catch {
+    state.user = null;
+  }
+  await renderRoute();
+}
+
+bootstrap();

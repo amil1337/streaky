@@ -60,8 +60,31 @@ public class AuthService {
 
   public User updateProfile(UUID id, ProfileRequest request) {
     User user = lockUser(id);
-    user.update(request.name(), request.bio(), zone(request.timezone(), user.getTimezone()));
+    if (request.username() != null) {
+      String key = normalizeUsername(request.username());
+      if (!key.equals(user.getUsername()) && users.existsByUsername(key))
+        throw new ResponseStatusException(CONFLICT, "Username already exists");
+      user.updateUsername(key, request.username());
+    }
+    if (request.name() != null && request.name().isBlank())
+      throw new ResponseStatusException(BAD_REQUEST, "Name cannot be blank");
+    user.update(
+        request.name(), request.bio() == null ? user.getBio() : request.bio(),
+        zone(request.timezone(), user.getTimezone()));
     return user;
+  }
+
+  public void changePassword(UUID id, String currentPassword, String newPassword) {
+    User user = lockUser(id);
+    verifyPassword(user, currentPassword);
+    checkPassword(newPassword);
+    user.updatePassword(passwords.encode(newPassword));
+  }
+
+  void verifyPassword(User user, String password) {
+    checkPassword(password);
+    if (!passwords.matches(password, user.getPasswordHash()))
+      throw new ResponseStatusException(UNAUTHORIZED, "Invalid password");
   }
 
   private String zone(String value, String fallback) {

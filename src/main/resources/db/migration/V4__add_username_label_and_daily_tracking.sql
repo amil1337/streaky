@@ -1,0 +1,2 @@
+ALTER TABLE app_users ADD COLUMN username_label VARCHAR(40);
+ALTER TABLE habits ADD COLUMN tracking_days_mask INTEGER DEFAULT 127 NOT NULL;

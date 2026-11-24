@@ -15,5 +15,8 @@ public interface HabitProgressRepository extends JpaRepository<HabitProgress, UU
   @Query("select p from HabitProgress p where p.habit.user.id = :userId and p.date = :date")
   List<HabitProgress> findOwnedOnDate(UUID userId, LocalDate date);
 
+  @org.springframework.data.jpa.repository.EntityGraph(attributePaths = "habit")
+  List<HabitProgress> findAllByHabit_User_Id(UUID userId);
+
   boolean existsByHabit_IdAndCountGreaterThan(UUID habitId, int count);
 }
